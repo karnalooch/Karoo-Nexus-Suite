@@ -1,0 +1,89 @@
+@import "tailwindcss";
+
+@theme {
+  /* --- KAROO NEXUS V12: ATMOSPHERE ENGINE (OKLCH) --- */
+  
+  /* Solar Mode (Light) - Ethereal & High-Definition */
+  --color-background: oklch(99% 0.005 250); 
+  --color-foreground: oklch(12% 0.02 240); 
+  
+  /* Brand Prestige - Karoo Orange/Primary */
+  --color-primary: oklch(65% 0.2 45); 
+  --color-primary-foreground: oklch(100% 0 0);
+  
+  /* System Surfaces */
+  --color-secondary: oklch(96% 0.008 240);
+  --color-muted: oklch(97% 0.005 240);
+  --color-border: oklch(92% 0.01 240);
+
+  /* --- GEOMETRY & PHYSICS --- */
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+  --radius-3xl: 1.25rem;
+  --radius-dashboard: 1.5rem;
+
+  /* Cinema Physics (Prestige Timing) */
+  --duration-cinema: 1200ms;
+  --ease-cinema: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* Font */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer base {
+  ::selection {
+    background-color: oklch(65% 0.2 45 / 0.25);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: oklch(65% 0.2 45 / 0.3) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: oklch(65% 0.2 45 / 0.3);
+    border-radius: 999px;
+  }
+
+  .dark {
+    /* Obsidian Mode (Dark) - Deep Velocity & Vantablack */
+    --color-background: oklch(8% 0.02 240); 
+    --color-foreground: oklch(98% 0.005 240);
+    
+    --color-secondary: oklch(14% 0.03 240);
+    --color-muted: oklch(12% 0.02 240);
+    --color-border: oklch(18% 0.03 240);
+    --color-card: oklch(10% 0.02 240);
+  }
+}
+
+@layer utilities {
+  .glass-card {
+    @apply bg-white/40 dark:bg-slate-900/40 backdrop-blur-3xl border border-white/20 dark:border-white/10 shadow-lg transition-colors duration-300;
+  }
+
+  .page-enter {
+    animation: page-enter 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+}
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
