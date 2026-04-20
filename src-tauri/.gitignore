@@ -2,3 +2,5 @@
 # will have compiled files and executables
 /target/
 /gen/schemas
+*.zip
+check_output.txt
