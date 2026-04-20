@@ -2,9 +2,9 @@ use std::fs::File;
 use std::path::PathBuf;
 use fitparser;
 use serde::Serialize;
-use tauri_plugin_shell::ShellExt;
 use tauri::Manager;
-use crate::adb_path;
+use tauri_plugin_shell::ShellExt;
+use crate::{adb_path, log_adb};
 
 
 #[derive(Serialize, Debug)]
@@ -24,9 +24,12 @@ pub async fn sync_activities(app: tauri::AppHandle) -> Result<String, String> {
     let backup_dir = app_dir.join("backups");
     std::fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
 
+    let args = ["pull", "/sdcard/Documents/Hammerhead/Activities/", backup_dir.to_str().unwrap()];
+    log_adb(&app, &args);
+
     let output = app.shell()
         .command(&adb_path())
-        .args(["pull", "/sdcard/Documents/Hammerhead/Activities/", backup_dir.to_str().unwrap()])
+        .args(args)
         .output()
         .await
         .map_err(|e| e.to_string())?;
@@ -35,6 +38,25 @@ pub async fn sync_activities(app: tauri::AppHandle) -> Result<String, String> {
         Ok(format!("Synced to: {:?}", backup_dir))
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+fn to_f64(val: &fitparser::Value) -> f64 {
+    match val {
+        fitparser::Value::Timestamp(t) => t.timestamp() as f64,
+        fitparser::Value::Byte(v) => *v as f64,
+        fitparser::Value::Enum(v) => *v as f64,
+        fitparser::Value::SInt8(v) => *v as f64,
+        fitparser::Value::UInt8(v) => *v as f64,
+        fitparser::Value::SInt16(v) => *v as f64,
+        fitparser::Value::UInt16(v) => *v as f64,
+        fitparser::Value::SInt32(v) => *v as f64,
+        fitparser::Value::UInt32(v) => *v as f64,
+        fitparser::Value::Float32(v) => *v as f64,
+        fitparser::Value::Float64(v) => *v,
+        fitparser::Value::SInt64(v) => *v as f64,
+        fitparser::Value::UInt64(v) => *v as f64,
+        _ => 0.0,
     }
 }
 
@@ -63,9 +85,9 @@ pub async fn analyze_fit_file(path: String) -> Result<FitSummary, String> {
             fitparser::profile::MesgNum::Session => {
                 for field in record.fields() {
                     match field.name() {
-                        "total_elapsed_time" => summary.duration_mins = field.value().to_f64().unwrap_or(0.0) / 60.0,
-                        "total_distance" => summary.distance_km = field.value().to_f64().unwrap_or(0.0) / 1000.0,
-                        "total_calories" => summary.calories = field.value().to_f64().unwrap_or(0.0),
+                        "total_elapsed_time" => summary.duration_mins = to_f64(field.value()) / 60.0,
+                        "total_distance" => summary.distance_km = to_f64(field.value()) / 1000.0,
+                        "total_calories" => summary.calories = to_f64(field.value()),
                         "start_time" => summary.start_time = field.value().to_string(),
                         _ => {}
                     }
@@ -74,8 +96,8 @@ pub async fn analyze_fit_file(path: String) -> Result<FitSummary, String> {
             fitparser::profile::MesgNum::Record => {
                 for field in record.fields() {
                     match field.name() {
-                        "power" => { total_power += field.value().to_f64().unwrap_or(0.0); power_count += 1; },
-                        "heart_rate" => { total_hr += field.value().to_f64().unwrap_or(0.0); hr_count += 1; },
+                        "power" => { total_power += to_f64(field.value()); power_count += 1; },
+                        "heart_rate" => { total_hr += to_f64(field.value()); hr_count += 1; },
                         _ => {}
                     }
                 }

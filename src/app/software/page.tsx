@@ -2,8 +2,10 @@
 
 import { motion } from "framer-motion";
 import { Zap, Activity, Search, Download, UploadCloud, Smartphone } from "lucide-react";
-import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
+import { useEffect, useState } from "react";
 
 const SOFTWARE_LIBRARY = [
   { id: "ki2", name: "Ki2 Extension", desc: "Shimano Di2 Gear Integration", icon: Zap, version: "v3.1.2", category: "Utility" },
@@ -15,13 +17,61 @@ export default function SoftwareHub() {
   const [isInstalling, setIsInstalling] = useState<string | null>(null);
   const [adbStatus, setAdbStatus] = useState("Disconnected"); // In real use, this would be global state/context
 
-  const handleInstall = async (appId: string) => {
-    setIsInstalling(appId);
-    // Mocking the wait for install
-    setTimeout(() => {
-      setIsInstalling(null);
-    }, 2000);
+  const logInteraction = async (msg: string) => {
+    try {
+      await invoke("log_interaction", { action: msg });
+    } catch (e) {
+      console.error("Log failed", e);
+    }
   };
+
+  const handleInstall = async (appId: string, appName: string) => {
+    // Note: In a real app we'd have the APK path here. 
+    // For the curated library, we'll assume they are not yet downloaded.
+    logInteraction(`Status Check: ${appName} APK not found in local cache.`);
+    logInteraction("Please use the 'Neural Flash' zone below for custom APK deployment.");
+  };
+
+  const handleSideload = async (path: string) => {
+    setIsInstalling("custom");
+    logInteraction(`FLASHER :: Initiating Neural Sideload for ${path}`);
+    try {
+      const res = await invoke("install_package", { path }) as string;
+      logInteraction(`FLASHER :: Success :: ${res}`);
+    } catch (e) {
+      logInteraction(`FLASHER :: Failure :: ${e}`);
+    } finally {
+      setIsInstalling(null);
+    }
+  };
+
+  const pickFile = async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: 'Android Package', extensions: ['apk'] }]
+    });
+    if (selected) {
+      handleSideload(selected as string);
+    }
+  };
+
+  useEffect(() => {
+    const unlisten = listen("tauri://drag-drop", (event: any) => {
+      // In Tauri v2, the payload structure might differ slightly but paths is common
+      const paths = event.payload.paths;
+      if (paths && paths.length > 0) {
+        const apk = paths.find((p: string) => p.endsWith(".apk"));
+        if (apk) {
+          handleSideload(apk);
+        } else {
+          logInteraction("FLASHER :: Rejected non-APK data stream.");
+        }
+      }
+    });
+    return () => {
+      unlisten.then(f => f());
+    };
+  }, []);
 
   return (
     <div className="p-12 max-w-[1600px] mx-auto space-y-12">
@@ -62,7 +112,7 @@ export default function SoftwareHub() {
                 
                 <div className="flex items-center gap-4">
                    <button 
-                     onClick={() => handleInstall(app.id)}
+                     onClick={() => handleInstall(app.id, app.name)}
                      disabled={isInstalling === app.id}
                      className={`flex-1 py-5 rounded-2xl font-black uppercase tracking-widest text-[11px] transition-all flex items-center justify-center gap-3 ${
                        isInstalling === app.id ? 'bg-primary/50 cursor-wait' : 'bg-primary text-white hover:shadow-2xl hover:translate-y-[-2px]'
@@ -83,17 +133,28 @@ export default function SoftwareHub() {
         {/* CUSTOM DEPLOYMENT ZONE */}
         <div className="space-y-8">
           <h2 className="text-2xl font-black italic uppercase tracking-tight">Neural <span className="text-primary not-italic">Flash</span></h2>
-          <div className="glass-card p-10 rounded-[3rem] border-dashed border-primary/30 flex flex-col items-center justify-center text-center space-y-8 min-h-[500px] group hover:bg-primary/5 transition-all cursor-pointer">
+          <div 
+            onClick={pickFile}
+            className={`glass-card p-10 rounded-[3rem] border-dashed border-primary/30 flex flex-col items-center justify-center text-center space-y-8 min-h-[500px] group hover:bg-primary/5 transition-all cursor-pointer relative overflow-hidden ${isInstalling ? 'opacity-50 pointer-events-none' : ''}`}
+          >
+             {isInstalling === "custom" && (
+               <div className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-50">
+                 <div className="flex flex-col items-center gap-4">
+                   <Zap className="w-12 h-12 text-primary animate-spin" />
+                   <p className="text-xs font-black uppercase tracking-widest text-primary animate-pulse">Syncing Tactical Package...</p>
+                 </div>
+               </div>
+             )}
              <div className="w-24 h-24 bg-primary/10 rounded-[2rem] flex items-center justify-center text-primary group-hover:scale-110 transition-transform">
                 <UploadCloud className="w-12 h-12" />
              </div>
-             <div className="space-y-2">
+             <div className="space-y-2 text-balance">
                 <p className="text-xl font-black italic uppercase tracking-tight">Drop Tactical APK</p>
-                <p className="text-xs text-slate-500 font-medium px-8">Drag any Android installable file here to initiate instant sideloading to your Karoo device.</p>
+                <p className="text-xs text-slate-500 font-medium px-8 leading-relaxed">Drag any Android installable file here or click to browse. Nexus will initiate instant sideloading to your Karoo device.</p>
              </div>
              <div className="flex items-center gap-3 text-[10px] font-black uppercase tracking-widest text-primary/50">
                 <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-                Awaiting Data Stream
+                {isInstalling === "custom" ? "Sideloading Progress..." : "Awaiting Data Stream"}
              </div>
           </div>
         </div>

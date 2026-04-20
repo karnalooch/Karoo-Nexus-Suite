@@ -1,16 +1,22 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Smartphone, ShieldCheck, HardDrive, Cpu, Activity, Zap, ArrowRight } from "lucide-react";
+import { Smartphone, ShieldCheck, HardDrive, Cpu, Activity, Zap, ArrowRight, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import Link from "next/link";
 
-function StatCard({ label, value, icon: Icon, accent = false, pulse = false }: {
-  label: string; value: string; icon: React.ElementType; accent?: boolean; pulse?: boolean;
+const TARGET_FIRMWARE = "1.352.1409.3";
+
+function StatCard({ label, value, icon: Icon, accent = false, pulse = false, onClick }: {
+  label: string; value: string; icon: React.ElementType; accent?: boolean; pulse?: boolean; onClick?: () => void;
 }) {
   return (
-    <div className={`glass-card p-8 rounded-3xl flex items-center gap-6 group transition-all hover:translate-y-[-2px] ${accent ? "border-primary/30" : ""}`}>
+    <div 
+      onClick={onClick}
+      className={`glass-card p-8 rounded-3xl flex items-center gap-6 group transition-all hover:translate-y-[-2px] cursor-pointer ${accent ? "border-primary/30" : ""}`}
+    >
       <div className={`p-4 rounded-2xl relative ${accent ? "bg-primary/20 text-primary" : "bg-white/5 text-slate-400"}`}>
         <Icon className="w-7 h-7" />
         {pulse && <div className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />}
@@ -26,6 +32,7 @@ function StatCard({ label, value, icon: Icon, accent = false, pulse = false }: {
 const QUICK_LINKS = [
   { href: "/software", icon: Zap, label: "Software Hub", desc: "Sideload extensions to your Karoo" },
   { href: "/activities", icon: Activity, label: "Activity Pulse", desc: "Sync and analyze FIT sessions" },
+  { href: "/investigation", icon: Search, label: "Tactical Investigation", desc: "Extract APKs and capture OTA links" },
 ];
 
 export default function Dashboard() {
@@ -33,12 +40,25 @@ export default function Dashboard() {
   const [deviceInfo, setDeviceInfo] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>(["Neural Core Initialized...", "Awaiting Device Pulse..."]);
 
-  const addLog = (msg: string) => setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev].slice(0, 8));
+  const addLog = (msg: string) => setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev].slice(0, 15));
+  
+  const logInteraction = (action: string) => addLog(`USER :: ${action}`);
 
   // Detect if running inside Tauri desktop app
   const isTauri = () => typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
 
   useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    async function setupListener() {
+      if (!isTauri()) return;
+      unlisten = await listen("nexus-log", (event) => {
+        addLog(event.payload as string);
+      });
+    }
+
+    setupListener();
+
     if (!isTauri()) {
       setAdbStatus("Dev Mode");
       addLog("Browser env detected — Tauri IPC unavailable");
@@ -55,7 +75,12 @@ export default function Dashboard() {
             addLog("Device Detected: HH-KAROO-X — Channel Open");
             const info = await invoke("get_karoo_info") as string;
             setDeviceInfo(info);
-            addLog(`Firmware ID: ${info}`);
+            
+            if (info === TARGET_FIRMWARE) {
+              addLog("SYSTEM :: Target 1.352.1409.3 Verified — Gold Standard Compliance");
+            } else {
+              addLog(`SYSTEM :: Detected ${info} — Version Drift noted from target 1.352.1409.3`);
+            }
           }
         } else {
           if (adbStatus === "Online") addLog("Neural Link Lost — Awaiting Reconnect...");
@@ -69,13 +94,18 @@ export default function Dashboard() {
     };
     const interval = setInterval(checkConnection, 3000);
     checkConnection();
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      if (unlisten) unlisten();
+    };
   }, [adbStatus]);
 
   const statusColor = adbStatus === "Online" ? "text-emerald-400" 
     : adbStatus === "Error" ? "text-red-400" 
     : adbStatus === "Dev Mode" ? "text-blue-400"
     : "text-slate-500";
+    
+  const isCompliant = deviceInfo === TARGET_FIRMWARE;
 
   return (
     <div className="p-12 max-w-[1600px] mx-auto space-y-12">
@@ -107,9 +137,22 @@ export default function Dashboard() {
           icon={Smartphone}
           accent={adbStatus === "Online"}
           pulse={adbStatus === "Online"}
+          onClick={() => logInteraction("Checking Connection Pulse")}
         />
-        <StatCard label="Active Firmware" value={deviceInfo || "Unidentified"} icon={ShieldCheck} accent />
-        <StatCard label="System Integrity" value="Neural Sync Active" icon={HardDrive} />
+        <StatCard 
+          label="Active Firmware" 
+          value={deviceInfo || "Unidentified"} 
+          icon={ShieldCheck} 
+          accent 
+          onClick={() => logInteraction("Inspecting Firmware Integrity")}
+        />
+        <StatCard 
+          label="System Integrity" 
+          value={isCompliant ? "Gold Standard" : (adbStatus === "Online" ? "Neural Drift" : "Inactive")} 
+          icon={HardDrive} 
+          accent={isCompliant}
+          onClick={() => logInteraction("Verifying System Integrity")}
+        />
       </div>
 
       <div className="flex flex-col xl:flex-row gap-12">
@@ -122,21 +165,28 @@ export default function Dashboard() {
             </span>
             <div className="text-[8px] font-black px-3 py-1.5 bg-primary/20 rounded-full uppercase tracking-widest text-primary">Live</div>
           </div>
-          <div className="p-10 space-y-5 font-mono min-h-[300px]">
+          <div className="p-10 space-y-5 font-mono min-h-[400px] max-h-[500px] overflow-y-auto custom-scrollbar">
             {logs.map((log, i) => (
               <motion.div
                 key={`${log}-${i}`}
                 initial={{ x: -20, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
-                className={`text-[10px] uppercase font-bold ${i === 0 ? "text-primary" : "text-slate-500"}`}
+                className={`text-[10px] uppercase font-bold break-all ${
+                  log.includes("EXEC ::") ? "text-emerald-500/80" 
+                  : log.includes("USER ::") ? "text-amber-400/80"
+                  : log.includes("SYSTEM ::") ? "text-blue-400"
+                  : i === 0 ? "text-primary" 
+                  : "text-slate-500"
+                }`}
               >
-                {log}
+                <span className="opacity-40 mr-2">{log.split("] ")[0]}]</span>
+                {log.split("] ").slice(1).join("] ")}
               </motion.div>
             ))}
           </div>
           <div className="p-8 bg-black/20 border-t border-white/5 flex items-center gap-4">
             <Cpu className="w-4 h-4 text-slate-600" />
-            <p className="text-[9px] font-black uppercase tracking-widest opacity-30 italic">Target: HH-K2-SRAM Neural Core</p>
+            <p className="text-[9px] font-black uppercase tracking-widest opacity-30 italic">Target: HH-K2-SRAM Neural Core :: 1.352.1409.3</p>
           </div>
         </div>
 
@@ -144,7 +194,7 @@ export default function Dashboard() {
         <div className="w-full xl:w-[380px] space-y-6">
           <h2 className="text-xl font-black italic uppercase tracking-tight">Quick <span className="text-primary not-italic">Launch</span></h2>
           {QUICK_LINKS.map(({ href, icon: Icon, label, desc }) => (
-            <Link key={href} href={href}>
+            <Link key={href} href={href} onClick={() => logInteraction(`Navigating to ${label}`)}>
               <motion.div
                 whileHover={{ x: 6, scale: 1.01 }}
                 className="glass-card p-8 rounded-3xl flex items-center gap-6 group hover:border-primary/40 transition-all cursor-pointer"
@@ -162,10 +212,13 @@ export default function Dashboard() {
           ))}
 
           {/* DEVICE CARD */}
-          <div className={`glass-card p-8 rounded-3xl space-y-4 transition-all ${adbStatus === "Online" ? "border-emerald-500/30" : ""}`}>
+          <div 
+            onClick={() => logInteraction("Opening Hardware Details")}
+            className={`glass-card p-8 rounded-3xl space-y-4 transition-all cursor-pointer ${adbStatus === "Online" ? (isCompliant ? "border-emerald-500/50" : "border-amber-500/30") : ""}`}
+          >
             <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Target Hardware</p>
             <div className="flex items-center gap-4">
-              <div className={`p-4 rounded-2xl ${adbStatus === "Online" ? "bg-emerald-500/20 text-emerald-400" : "bg-white/5 text-slate-600"}`}>
+              <div className={`p-4 rounded-2xl ${adbStatus === "Online" ? (isCompliant ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-400") : "bg-white/5 text-slate-600"}`}>
                 <Smartphone className="w-6 h-6" />
               </div>
               <div>
@@ -174,9 +227,12 @@ export default function Dashboard() {
               </div>
             </div>
             <div className="h-px bg-white/5" />
-            <p className="text-[9px] font-mono uppercase tracking-widest text-slate-600">
+            <p className={`text-[9px] font-mono uppercase tracking-widest ${isCompliant ? "text-emerald-500/60" : "text-slate-600"}`}>
               {deviceInfo ? `BUILD :: ${deviceInfo}` : "ADB channel pending..."}
             </p>
+            {adbStatus === "Online" && !isCompliant && (
+              <p className="text-[8px] font-black uppercase text-amber-500/80 italic">! Version Drift Detected</p>
+            )}
           </div>
         </div>
       </div>

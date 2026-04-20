@@ -46,3 +46,6 @@ next-env.d.ts
 
 # local build logs
 build_log.txt
+*.zip
+check_output.txt
+*.log
