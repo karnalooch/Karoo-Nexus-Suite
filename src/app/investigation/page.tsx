@@ -9,6 +9,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { useNexus } from "@/context/NexusContext";
 
 import { TacticalDownloader } from "@/components/TacticalDownloader";
+import { generateCloudFrontUrl } from "@/utils/cloudfront";
 
 interface AppInfo {
   id: string;
@@ -85,6 +86,7 @@ export default function InvestigationPage() {
   const [downloaderOpen, setDownloaderOpen] = useState(false);
   const [activeDownloadUrl, setActiveDownloadUrl] = useState<string | null>(null);
   const [activeFileName, setActiveFileName] = useState("");
+  const [activeDownloadedPath, setActiveDownloadedPath] = useState<string | null>(null);
 
   // OTA Target Device
   const [otaTarget, setOtaTarget] = useState<"karoo1" | "karoo2" | "karoo3" | "adb">("karoo2");
@@ -96,7 +98,7 @@ export default function InvestigationPage() {
     const setupListener = async () => {
       unlisten = await listen<string>("log_entry", (event) => {
         setLogs(prev => {
-          const next = [...prev, { id: Date.now(), msg: event.payload, time: new Date() }];
+          const next = [...prev, { id: Date.now() + Math.random(), msg: event.payload, time: new Date() }];
           return next.slice(-5); // Keep last 5
         });
       });
@@ -118,7 +120,7 @@ export default function InvestigationPage() {
 
   const logInteraction = async (msg: string) => {
     try {
-      setLogs(prev => [...prev, { id: Date.now(), msg, time: new Date() }].slice(-5));
+      setLogs(prev => [...prev, { id: Date.now() + Math.random(), msg, time: new Date() }].slice(-5));
       await invoke("log_interaction", { action: msg });
     } catch (e) {
       console.error("Log failed", e);
@@ -171,36 +173,24 @@ export default function InvestigationPage() {
        
        setActiveDownloadUrl(downloadUrl);
        setActiveFileName(`${version}.zip`);
+       setActiveDownloadedPath(null);
        setDownloaderOpen(true);
 
        const localPath = `${version}.zip`;
        const path = metadata.key || metadata.bucket;
        
-       if (metadata.bucket || metadata.key) {
-         const candidateBases = [
-           "https://karoo-repo.s3.us-east-1.amazonaws.com",
-           "https://com.hammerhead.karoo-updates.s3.us-east-1.amazonaws.com",
-           "https://s3.amazonaws.com/karoo-repo",
-           "https://s3.amazonaws.com/com.hammerhead.karoo-updates",
-           "https://s3.amazonaws.com/hammerhead-ota",
-           "https://s3.amazonaws.com/hammerhead-karoo-ota-production"
-         ];
-
-         for (const base of candidateBases) {
-           const attemptUrl = `${base}/${path}`;
-           setActiveDownloadUrl(attemptUrl);
-           logInteraction(`INVESTIGATION :: S3 SHARD PROBE :: ${base}`);
-           try {
-             await invoke("download_firmware", { url: attemptUrl, localPath });
-             logInteraction(`INVESTIGATION :: NEURAL MATCH :: Found on ${base}`);
-             return; 
-           } catch (e) {
-             console.error(`Shard failed: ${base}`, e);
-             if (base === candidateBases[candidateBases.length - 1]) {
-                logInteraction(`INVESTIGATION :: ALL SHARDS FAILED :: Neural Link Severed`);
-                emit("firmware-download-error", e);
-             }
-           }
+       if (metadata.key) {
+         try {
+           const signedUrl = await generateCloudFrontUrl(metadata.key);
+           setActiveDownloadUrl(signedUrl);
+           logInteraction(`INVESTIGATION :: AUTHENTICATED :: Generated Pre-Signed CloudFront URL`);
+           const absPath = await invoke<string>("download_firmware", { url: signedUrl, localPath });
+           setActiveDownloadedPath(absPath);
+           logInteraction(`INVESTIGATION :: SECURE TRANSFER :: Download Complete`);
+         } catch (e) {
+           console.error("CloudFront Signer failed:", e);
+           logInteraction(`INVESTIGATION :: CLOUDFRONT FAILURE :: ${e}`);
+           emit("firmware-download-error", e);
          }
        } else {
          try {
@@ -898,11 +888,13 @@ export default function InvestigationPage() {
 
       </div>
 
+      {/* MODALS */}
       <TacticalDownloader 
         isOpen={downloaderOpen}
         onClose={() => setDownloaderOpen(false)}
         fileName={activeFileName}
         url={activeDownloadUrl || ""}
+        downloadedPath={activeDownloadedPath}
       />
 
       {/* FLOATING ACTION LOGS */}

@@ -49,3 +49,6 @@ build_log.txt
 *.zip
 check_output.txt
 *.log
+
+# temporary files
+scratch/

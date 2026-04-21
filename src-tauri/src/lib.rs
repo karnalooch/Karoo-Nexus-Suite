@@ -149,8 +149,24 @@ async fn download_firmware(app: tauri::AppHandle, url: String, local_path: Strin
         }
     }
 
-    log_to_nexus(&app, format!("SYSTEM :: Download Complete :: {}", local_path));
-    Ok(format!("Successfully downloaded to {}", local_path))
+    let abs_path = std::fs::canonicalize(&local_path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&local_path))
+        .to_string_lossy()
+        .to_string();
+    log_to_nexus(&app, format!("SYSTEM :: Download Complete :: {}", abs_path));
+    Ok(abs_path)
+}
+
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    let parent = std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new(&path));
+    let abs_path = std::fs::canonicalize(parent).unwrap_or(std::path::PathBuf::from(parent));
+    
+    std::process::Command::new("explorer")
+        .arg(abs_path)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -503,6 +519,7 @@ pub fn run() {
             stop_map_proxy,
             generate_ca_cert,
             get_device_id,
+            open_folder,
             activity::sync_activities,
             activity::analyze_fit_file
         ])

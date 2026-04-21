@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Download, X, Zap, HardDrive, CheckCircle2, AlertCircle } from "lucide-react";
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 
 interface DownloadProgress {
   current: number;
@@ -11,14 +12,15 @@ interface DownloadProgress {
   percentage: number;
 }
 
-interface Props {
+interface TacticalDownloaderProps {
   isOpen: boolean;
   onClose: () => void;
+  url: string | null;
   fileName: string;
-  url: string;
+  downloadedPath?: string | null;
 }
 
-export function TacticalDownloader({ isOpen, onClose, fileName, url }: Props) {
+export function TacticalDownloader({ isOpen, onClose, url, fileName, downloadedPath }: TacticalDownloaderProps) {
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [status, setStatus] = useState<"idle" | "downloading" | "complete" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
@@ -134,12 +136,22 @@ export function TacticalDownloader({ isOpen, onClose, fileName, url }: Props) {
                 <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                 <span className="text-[10px] font-black uppercase tracking-widest text-emerald-500">Firmware Archive Secured</span>
              </div>
-             <button 
-               onClick={onClose}
-               className="px-6 py-2 bg-emerald-500 text-black text-[10px] font-black uppercase tracking-widest rounded-full hover:shadow-lg transition-all"
-             >
-                Close Channel
-             </button>
+             <div className="flex items-center gap-3">
+               {downloadedPath && (
+                 <button 
+                   onClick={() => invoke("open_folder", { path: downloadedPath }).catch(console.error)}
+                   className="px-6 py-2 border border-emerald-500/30 text-emerald-500 text-[10px] font-black uppercase tracking-widest rounded-full hover:bg-emerald-500/10 transition-all"
+                 >
+                    Show in Folder
+                 </button>
+               )}
+               <button 
+                 onClick={onClose}
+                 className="px-6 py-2 bg-emerald-500 text-black text-[10px] font-black uppercase tracking-widest rounded-full hover:shadow-lg transition-all"
+               >
+                  Close Channel
+               </button>
+             </div>
           </motion.div>
         )}
 
