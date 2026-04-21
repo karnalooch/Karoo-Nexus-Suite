@@ -89,7 +89,8 @@ export default function InvestigationPage() {
   const [activeDownloadedPath, setActiveDownloadedPath] = useState<string | null>(null);
 
   // OTA Target Device
-  const [otaTarget, setOtaTarget] = useState<"karoo1" | "karoo2" | "karoo3" | "adb">("karoo2");
+  const [otaTarget, setOtaTarget] = useState<"karoo1" | "karoo2" | "karoo3" | "adb">("karoo1");
+  const [manualDeviceId, setManualDeviceId] = useState("");
 
   const [logs, setLogs] = useState<{id: number, msg: string, time: Date}[]>([]);
 
@@ -217,11 +218,13 @@ export default function InvestigationPage() {
            version = "karoo-1.320.1345.3";
            break;
         case "karoo2":
-           deviceId = "ZD8DOF9PDEEQTKS8"; 
+           if (!manualDeviceId.trim()) throw new Error("Karoo 2 requires a valid Device ID.");
+           deviceId = manualDeviceId.trim(); 
            version = "karoo-2.0.0.0";
            break;
         case "karoo3":
-           deviceId = "karoo-v3-tactical-id";
+           if (!manualDeviceId.trim()) throw new Error("Karoo 3 requires a valid Device ID.");
+           deviceId = manualDeviceId.trim();
            version = "karoo-3.0.0.0";
            break;
         case "adb":
@@ -746,10 +749,28 @@ export default function InvestigationPage() {
                 className="w-full bg-background border border-border rounded-md p-3 text-xs focus:border-primary outline-none transition-all"
               >
                 <option value="karoo1">Target: Karoo 1 (Gen 1)</option>
-                <option value="karoo2">Target: Karoo 2 (Gen 2 - Recommended)</option>
+                <option value="karoo2">Target: Karoo 2 (Gen 2)</option>
                 <option value="karoo3">Target: Karoo 3 (Gen 3)</option>
                 <option value="adb">Target: Connected Device (via ADB)</option>
               </select>
+
+              <div className="text-[10px] text-slate-500 font-medium px-1 flex justify-between">
+                 <span>{otaTarget === 'karoo1' ? 'Latest known: ~1.320.1345.3' : (otaTarget === 'karoo2' || otaTarget === 'karoo3' ? 'Latest known: 1.628.2410' : '')}</span>
+                 {otaTarget === 'karoo1' && <span className="text-red-400">Support Ended</span>}
+              </div>
+
+              {(otaTarget === "karoo2" || otaTarget === "karoo3") && (
+                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="space-y-1">
+                   <input 
+                     type="text"
+                     value={manualDeviceId}
+                     onChange={(e) => setManualDeviceId(e.target.value)}
+                     placeholder={`Enter ${otaTarget === "karoo2" ? "Karoo 2" : "Karoo 3"} Device ID (Serial Number)`}
+                     className="w-full bg-secondary border border-border rounded-md p-3 text-xs focus:border-primary outline-none transition-all font-mono"
+                   />
+                   <p className="text-[9px] text-red-400 font-medium px-1">Hardware-specific Firmware requires a valid Device ID.</p>
+                </motion.div>
+              )}
 
               <button 
                 onClick={checkLatestFirmware}
