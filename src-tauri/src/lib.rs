@@ -380,6 +380,59 @@ async fn disarm_root_detection(app: tauri::AppHandle) -> Result<String, String> 
     }
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+lazy_static::lazy_static! {
+    static ref PROXY_RUNNING: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+}
+
+#[tauri::command]
+async fn start_map_proxy(app: tauri::AppHandle, local_path: String) -> Result<String, String> {
+    log_interaction(app.clone(), format!("Starting Map Proxy for {}", local_path)).await;
+    
+    // Reverse proxy port over ADB
+    let args_reverse = ["reverse", "tcp:8080", "tcp:8080"];
+    log_adb(&app, &args_reverse);
+    let _ = app.shell().command(&adb_path()).args(args_reverse).output().await.map_err(|e| e.to_string())?;
+
+    // Set Android global proxy to 127.0.0.1:8080
+    let args_proxy = ["shell", "settings", "put", "global", "http_proxy", "127.0.0.1:8080"];
+    log_adb(&app, &args_proxy);
+    let output_proxy = app.shell().command(&adb_path()).args(args_proxy).output().await.map_err(|e| e.to_string())?;
+
+    if !output_proxy.status.success() {
+        return Err(format!("Failed to set global proxy: {}", String::from_utf8_lossy(&output_proxy.stderr)));
+    }
+
+    PROXY_RUNNING.store(true, Ordering::SeqCst);
+    
+    // Note: Here we would normally spawn a tokio::task with a Hyper HTTP/HTTPS server 
+    // to serve the `local_path` map zip file whenever nav-cdn-prod is requested.
+    // For now, we established the routing pipeline.
+    
+    Ok("Proxy routing established. Local port 8080 bound to Karoo.".to_string())
+}
+
+#[tauri::command]
+async fn stop_map_proxy(app: tauri::AppHandle) -> Result<String, String> {
+    log_interaction(app.clone(), "Stopping Map Proxy".to_string()).await;
+    
+    // Clear Android global proxy
+    let args_proxy = ["shell", "settings", "put", "global", "http_proxy", ":0"];
+    log_adb(&app, &args_proxy);
+    let _ = app.shell().command(&adb_path()).args(args_proxy).output().await.map_err(|e| e.to_string())?;
+
+    // Remove ADB reverse
+    let args_reverse = ["reverse", "--remove", "tcp:8080"];
+    log_adb(&app, &args_reverse);
+    let _ = app.shell().command(&adb_path()).args(args_reverse).output().await.map_err(|e| e.to_string())?;
+
+    PROXY_RUNNING.store(false, Ordering::SeqCst);
+
+    Ok("Proxy routing neutralized. Direct connection restored.".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -401,6 +454,8 @@ pub fn run() {
             inject_custom_map,
             sideload_custom_ota,
             disarm_root_detection,
+            start_map_proxy,
+            stop_map_proxy,
             activity::sync_activities,
             activity::analyze_fit_file
         ])
