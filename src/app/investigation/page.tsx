@@ -209,28 +209,32 @@ export default function InvestigationPage() {
     logInteraction("INVESTIGATION :: Querying Hammerhead OTA Matrix...");
     try {
       let deviceId = "";
+      let version = "karoo-1.320.1345.3";
       
       switch (otaTarget) {
         case "karoo1":
            deviceId = "karoo-v1-tactical-id"; 
+           version = "karoo-1.320.1345.3";
            break;
         case "karoo2":
            deviceId = "ZD8DOF9PDEEQTKS8"; 
+           version = "karoo-2.0.0.0";
            break;
         case "karoo3":
            deviceId = "karoo-v3-tactical-id";
+           version = "karoo-3.0.0.0";
            break;
         case "adb":
            if (isOffline) throw new Error("Device offline. Cannot pull ID via ADB.");
            const id = await invoke("get_device_id");
            deviceId = id as string;
            if (!deviceId) throw new Error("Received empty device ID from ADB.");
+           version = "latest";
            break;
       }
 
       logInteraction(`INVESTIGATION :: Using Device ID: ${deviceId} [Target: ${otaTarget.toUpperCase()}]`);
 
-      const version = "karoo-1.320.1345.3";
       const url = `https://api.hammerhead.io/v1/device/update?deviceid=${deviceId}&version=${version}&clientVersion=v2`;
       await fetchAndDownloadOTA(url);
     } catch (e) {

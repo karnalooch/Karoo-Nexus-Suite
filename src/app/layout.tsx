@@ -37,7 +37,7 @@ export default function RootLayout({
             <Sidebar />
             <main className="flex-1 h-screen overflow-y-auto relative">
                {/* WINDOW CONTROLS */}
-               <div className="fixed top-0 right-0 z-[200] pointer-events-none">
+               <div className="fixed top-0 right-0 z-[200]">
                  <WindowControls />
                </div>
 
