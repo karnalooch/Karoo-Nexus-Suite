@@ -1,9 +1,10 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Search, Download, Zap, Terminal, ShieldAlert, Cpu, HardDriveDownload, Network, ShieldCheck, Map, Settings, Unlock } from "lucide-react";
+import { Search, Download, Zap, Terminal, ShieldAlert, Cpu, HardDriveDownload, Network, ShieldCheck, Map, Settings, Unlock, Lock } from "lucide-react";
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, emit } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useNexus } from "@/context/NexusContext";
 
@@ -41,25 +42,20 @@ const prettifyPackageName = (id: string): string => {
   else if (id.includes(".services.")) name = id.split(".services.").pop() || id;
   else if (id.includes(".inputmethod.")) name = id.split(".inputmethod.").pop() || id;
   else {
-    // Remove broad technical prefixes
     name = id.replace(/^(com|io|net|org|android)\.(android|google|hammerhead|karoo|mediatek|qualcomm|sunmi|zx|skylite|tinyroom|vending|chrome)\./, "");
   }
   
-  // Take last segment if dots still exist
   if (name.includes(".")) {
     name = name.split(".").pop() || name;
   }
 
-  // Transform separators and CamelCase
   name = name.replace(/[_-]/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2");
   
-  // Clean up and Title Case
   const finalName = name.split(" ").map(word => {
     if (word.length === 0) return "";
     return word.charAt(0).toUpperCase() + word.slice(1);
   }).join(" ").trim();
 
-  // Robust Fallback: if result is empty or too short, use the last segment of the original ID
   if (!finalName || finalName.length < 2) {
     const segments = id.split(".");
     const lastSegment = segments[segments.length - 1];
@@ -80,13 +76,49 @@ export default function InvestigationPage() {
   const { adbStatus } = useNexus();
   const isOffline = adbStatus !== "Online";
   
+  // Security Lock
+  const [isUnlocked, setIsUnlocked] = useState(false);
+  const [passcode, setPasscode] = useState("");
+  const [passcodeError, setPasscodeError] = useState(false);
+  
   // Downloader state
   const [downloaderOpen, setDownloaderOpen] = useState(false);
   const [activeDownloadUrl, setActiveDownloadUrl] = useState<string | null>(null);
   const [activeFileName, setActiveFileName] = useState("");
 
+  // OTA Target Device
+  const [otaTarget, setOtaTarget] = useState<"karoo1" | "karoo2" | "karoo3" | "adb">("karoo2");
+
+  const [logs, setLogs] = useState<{id: number, msg: string, time: Date}[]>([]);
+
+  useEffect(() => {
+    let unlisten: any;
+    const setupListener = async () => {
+      unlisten = await listen<string>("log_entry", (event) => {
+        setLogs(prev => {
+          const next = [...prev, { id: Date.now(), msg: event.payload, time: new Date() }];
+          return next.slice(-5); // Keep last 5
+        });
+      });
+    };
+    setupListener();
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (logs.length > 0) {
+      const timer = setTimeout(() => {
+        setLogs(prev => prev.slice(1));
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [logs]);
+
   const logInteraction = async (msg: string) => {
     try {
+      setLogs(prev => [...prev, { id: Date.now(), msg, time: new Date() }].slice(-5));
       await invoke("log_interaction", { action: msg });
     } catch (e) {
       console.error("Log failed", e);
@@ -96,7 +128,6 @@ export default function InvestigationPage() {
   const fetchAndDownloadOTA = async (url: string) => {
      logInteraction(`INVESTIGATION :: Interrogating OTA Metadata Channel...`);
      try {
-       // 1. Fetch metadata
        const metadata: any = await invoke("fetch_ota_metadata", { url });
        console.log("OTA Metadata received:", metadata);
        
@@ -106,7 +137,6 @@ export default function InvestigationPage() {
 
        logInteraction(`INVESTIGATION :: Metadata Channel Response: Update Found`);
        
-       // Handle different possible structures from Hammerhead API
        let downloadUrl = "";
        let version = "karoo-tactical-update";
 
@@ -120,7 +150,6 @@ export default function InvestigationPage() {
          downloadUrl = metadata.download_url;
          version = metadata.build_number || version;
        } else if (metadata.bucket || metadata.key) {
-         // S3 Discovery Matrix - Cycle through regional shards
          const path = metadata.key || metadata.bucket;
          const candidateBases = [
            "https://karoo-repo.s3.us-east-1.amazonaws.com",
@@ -129,7 +158,6 @@ export default function InvestigationPage() {
            "https://s3.amazonaws.com/com.hammerhead.karoo-updates"
          ];
 
-         // Force regional us-east-1 for the first attempt as it is the most documented SRAM shard
          downloadUrl = `${candidateBases[0]}/${path}`;
          version = metadata.version || version;
        }
@@ -141,12 +169,10 @@ export default function InvestigationPage() {
 
        logInteraction(`INVESTIGATION :: Extracted Download URL: ${downloadUrl}`);
        
-       // 2. Open Downloader UI
        setActiveDownloadUrl(downloadUrl);
        setActiveFileName(`${version}.zip`);
        setDownloaderOpen(true);
 
-       // 3. Initiate actual download with AUTO-DISCOVERY retry
        const localPath = `${version}.zip`;
        const path = metadata.key || metadata.bucket;
        
@@ -170,21 +196,56 @@ export default function InvestigationPage() {
              return; 
            } catch (e) {
              console.error(`Shard failed: ${base}`, e);
-             // If this was the last attempt, we don't throw (to avoid React crash)
-             // The component already knows there was an error via the event listener
              if (base === candidateBases[candidateBases.length - 1]) {
                 logInteraction(`INVESTIGATION :: ALL SHARDS FAILED :: Neural Link Severed`);
+                emit("firmware-download-error", e);
              }
            }
          }
        } else {
-         await invoke("download_firmware", { url: downloadUrl, localPath });
+         try {
+           await invoke("download_firmware", { url: downloadUrl, localPath });
+         } catch (e) {
+           emit("firmware-download-error", e);
+         }
        }
 
      } catch (e) {
         logInteraction(`INVESTIGATION :: OTA Channel Failure :: ${e}`);
-        // Removed system alert and auto-close to keep the manual recovery link visible
      }
+  };
+
+  const checkLatestFirmware = async () => {
+    logInteraction("INVESTIGATION :: Querying Hammerhead OTA Matrix...");
+    try {
+      let deviceId = "";
+      
+      switch (otaTarget) {
+        case "karoo1":
+           deviceId = "karoo-v1-tactical-id"; 
+           break;
+        case "karoo2":
+           deviceId = "ZD8DOF9PDEEQTKS8"; 
+           break;
+        case "karoo3":
+           deviceId = "karoo-v3-tactical-id";
+           break;
+        case "adb":
+           if (isOffline) throw new Error("Device offline. Cannot pull ID via ADB.");
+           const id = await invoke("get_device_id");
+           deviceId = id as string;
+           if (!deviceId) throw new Error("Received empty device ID from ADB.");
+           break;
+      }
+
+      logInteraction(`INVESTIGATION :: Using Device ID: ${deviceId} [Target: ${otaTarget.toUpperCase()}]`);
+
+      const version = "karoo-1.320.1345.3";
+      const url = `https://api.hammerhead.io/v1/device/update?deviceid=${deviceId}&version=${version}&clientVersion=v2`;
+      await fetchAndDownloadOTA(url);
+    } catch (e) {
+      logInteraction(`INVESTIGATION :: Latest OTA Query Failed :: ${e}`);
+    }
   };
 
   const scanAPKs = async () => {
@@ -194,9 +255,8 @@ export default function InvestigationPage() {
     try {
       const list = await invoke("list_packages") as string[];
       const parsed: AppInfo[] = list
-        .filter(line => line.includes("package:")) // Discard non-package lines (header/warnings)
+        .filter(line => line.includes("package:")) 
         .map(pkgLine => {
-          // Robust splitting of package:/path/to.apk=com.id
           const lastEq = pkgLine.lastIndexOf("=");
           
           if (lastEq === -1) {
@@ -226,7 +286,6 @@ export default function InvestigationPage() {
     
     logInteraction(`INVESTIGATION :: Initiating Batch Extraction [${selectedIds.size} Targets]`);
     
-    // 1. Select Target Directory
     const dir = await open({
       directory: true,
       multiple: false,
@@ -247,14 +306,12 @@ export default function InvestigationPage() {
         continue;
       }
 
-      // Update local state to 'pulling'
       setPackages(prev => prev.map(p => p.id === target.id ? { ...p, status: 'pulling' } : p));
       
       const safeName = sanitizeFilename(target.name);
       const safeId = sanitizeFilename(target.id);
       const fileName = `${safeName}_${safeId}.apk`;
       
-      // Clean target directory path and combine
       const cleanDir = dir.replace(/\\/g, '/').replace(/\/$/, '');
       const localPath = `${cleanDir}/${fileName}`;
       
@@ -287,6 +344,12 @@ export default function InvestigationPage() {
     setSelectedIds(next);
   };
 
+  const filteredPackages = packages.filter(p => {
+    const matchesFilter = p.id.toLowerCase().includes(filter.toLowerCase()) || p.name.toLowerCase().includes(filter.toLowerCase());
+    const matchesTab = activeTab === 'all' || (activeTab === 'user' && !p.isSystem) || (activeTab === 'system' && p.isSystem);
+    return matchesFilter && matchesTab;
+  });
+
   const toggleSelectAll = () => {
     const visibleIds = filteredPackages.map(p => p.id);
     const allVisibleSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.has(id));
@@ -310,7 +373,6 @@ export default function InvestigationPage() {
     try {
       const links = await invoke("capture_ota_logcat") as string[];
       if (links.length > 0) {
-        // Filter out duplicates
         setCapturedLinks(prev => Array.from(new Set([...links, ...prev])));
       }
     } catch (e) {
@@ -321,7 +383,6 @@ export default function InvestigationPage() {
   };
 
   const testOTA = async () => {
-    // Current SRAM standard for legacy support uses v2 telemetry
     const deviceId = "ZD8DOF9PDEEQTKS8";
     const version = "karoo-1.320.1345.3";
     const testUrl = `https://api.hammerhead.io/v1/device/update?deviceid=${deviceId}&version=${version}&clientVersion=v2`;
@@ -418,424 +479,449 @@ export default function InvestigationPage() {
     }
   };
 
-  const filteredPackages = packages.filter(p => {
-    const matchesFilter = p.id.toLowerCase().includes(filter.toLowerCase()) || p.name.toLowerCase().includes(filter.toLowerCase());
-    const matchesTab = activeTab === 'all' || (activeTab === 'user' && !p.isSystem) || (activeTab === 'system' && p.isSystem);
-    return matchesFilter && matchesTab;
-  });
+  const handleUnlock = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (passcode === "1234") {
+      setIsUnlocked(true);
+      setPasscodeError(false);
+      logInteraction("INVESTIGATION :: Security Bypass Successful");
+    } else {
+      setPasscodeError(true);
+      setPasscode("");
+      logInteraction("INVESTIGATION :: Security Bypass Failed");
+    }
+  };
+
+  if (!isUnlocked) {
+    return (
+      <div className="max-w-[800px] mx-auto mt-20 p-8">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-background/40 backdrop-blur-3xl p-10 rounded-2xl border border-border shadow-2xl flex flex-col items-center text-center space-y-6 relative overflow-hidden"
+        >
+          <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-red-500 via-orange-500 to-red-500" />
+          
+          <div className="p-4 bg-red-500/10 rounded-full border border-red-500/20">
+             <Lock className="w-8 h-8 text-red-500" />
+          </div>
+
+          <div className="space-y-2">
+             <h2 className="text-2xl font-bold tracking-tight text-foreground">Restricted Area</h2>
+             <p className="text-sm text-slate-500 font-medium max-w-md mx-auto">
+               System Analysis & Engineering Core contains low-level device manipulation tools. Authorized personnel only.
+             </p>
+          </div>
+
+          <form onSubmit={handleUnlock} className="w-full max-w-xs space-y-4 pt-4">
+             <div className="space-y-2">
+               <input 
+                 type="password"
+                 value={passcode}
+                 onChange={e => setPasscode(e.target.value)}
+                 placeholder="Enter Passcode"
+                 className={`w-full bg-secondary border ${passcodeError ? 'border-red-500 text-red-500' : 'border-border'} rounded-lg p-3 text-center tracking-widest font-mono text-lg focus:border-primary outline-none transition-all`}
+                 autoFocus
+               />
+               {passcodeError && (
+                 <p className="text-[10px] font-bold text-red-500 uppercase tracking-wider animate-pulse">Access Denied</p>
+               )}
+             </div>
+             
+             <button type="submit" className="w-full py-3 bg-foreground text-background font-bold rounded-lg hover:opacity-90 transition-all shadow-lg flex items-center justify-center gap-2">
+                <Unlock className="w-4 h-4" />
+                Authenticate
+             </button>
+          </form>
+        </motion.div>
+
+        {/* Floating Logs on Lock Screen */}
+        <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2 w-80 pointer-events-none">
+          {logs.map(log => (
+            <motion.div
+              key={log.id}
+              initial={{ opacity: 0, x: 20, scale: 0.95 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className="bg-secondary border border-border text-foreground p-3 rounded-md shadow-2xl flex flex-col pointer-events-auto"
+            >
+              <div className="flex justify-between items-center mb-1">
+                <span className="text-[10px] font-bold text-primary tracking-wider">SYSTEM EVENT</span>
+                <span className="text-[10px] text-slate-500">{log.time.toLocaleTimeString()}</span>
+              </div>
+              <p className="text-xs break-words leading-relaxed">{log.msg.replace('INVESTIGATION :: ', '')}</p>
+            </motion.div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="max-w-[1400px] mx-auto space-y-10 pb-20">
-      <header className="space-y-4">
-        <h1 className="text-3xl font-bold tracking-tight">
-          System Analysis
-        </h1>
+    <div className="max-w-[1600px] mx-auto space-y-8 pb-20 px-2">
+      <header className="space-y-3 mb-8">
+        <h1 className="text-3xl font-bold tracking-tight">System Analysis</h1>
         <p className="text-slate-500 font-medium max-w-2xl text-sm leading-relaxed">
-          Extract tactical APKs from system partitions and intercept OTA update streams. Root is not required for APK extraction.
+          Tactical control centers for OTA manipulation, Map injection, and System package extraction.
         </p>
       </header>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-12">
-        {/* APK EXTRACTOR */}
-        <div className="bg-background/40 backdrop-blur-3xl rounded-lg overflow-hidden flex flex-col border border-border shadow-lg min-h-[700px]">
-          <div className="p-4 bg-secondary border-b border-border flex items-center justify-between">
-            <div className="flex items-center gap-3">
-               <div className="p-2 bg-primary/10 rounded-md text-primary">
-                  <HardDriveDownload className="w-4 h-4" />
-               </div>
-               <span className="text-sm font-bold tracking-tight">Package Extractor</span>
-            </div>
-            <div className="flex gap-2">
-              <button 
-                onClick={toggleSelectAll}
-                disabled={isScanning || packages.length === 0}
-                className={`px-4 py-1.5 border text-xs font-semibold rounded-md transition-all ${
-                  filteredPackages.length > 0 && filteredPackages.every(p => selectedIds.has(p.id))
-                    ? 'bg-primary text-white border-primary'
-                    : 'bg-secondary border-border text-slate-500 hover:border-slate-400'
-                }`}
-              >
-                 {filteredPackages.length > 0 && filteredPackages.every(p => selectedIds.has(p.id)) ? "Deselect All" : "Select All"}
-              </button>
-              <button 
-                onClick={scanAPKs}
-                disabled={isScanning || isOffline}
-                className="px-4 py-1.5 bg-primary text-white text-xs font-semibold rounded-md hover:opacity-90 transition-all disabled:opacity-50 shadow-sm shadow-primary/20"
-              >
-                {isScanning ? "Scanning..." : "Scan Device"}
-              </button>
-            </div>
-          </div>
-
-          <div className="p-4 border-b border-border bg-secondary/50 space-y-4">
-             <div className="flex gap-2">
-                {(['all', 'user', 'system'] as const).map(tab => (
-                   <button
-                     key={tab}
-                     onClick={() => setActiveTab(tab)}
-                     className={`flex-1 py-1.5 rounded-md text-[11px] font-semibold transition-all ${
-                       activeTab === tab ? 'bg-primary text-white shadow-sm' : 'bg-background border border-border text-slate-500 hover:bg-secondary'
-                     }`}
-                   >
-                      {tab.charAt(0).toUpperCase() + tab.slice(1)}
-                   </button>
-                ))}
-             </div>
-             <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
-                <input 
-                  type="text" 
-                  placeholder="Filter by package..."
-                  value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
-                  className="w-full bg-background border border-border rounded-md py-2 pl-10 pr-4 text-xs focus:border-primary/50 outline-none transition-all placeholder:text-slate-500"
-                />
-             </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-2 relative min-h-0">
-             {selectedIds.size > 0 && (
-                <motion.div 
-                   initial={{ y: 20, opacity: 0 }}
-                   animate={{ y: 0, opacity: 1 }}
-                   className="sticky bottom-0 left-0 right-0 z-50 p-4 bg-background border-t border-border shadow-2xl flex items-center justify-between"
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        
+        {/* === COLUMN 1: APK & SYSTEM OPS === */}
+        <div className="space-y-6">
+          <div className="bg-background/40 backdrop-blur-3xl rounded-lg overflow-hidden flex flex-col border border-border shadow-lg h-[500px]">
+            <div className="p-4 bg-secondary border-b border-border flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                 <div className="p-2 bg-primary/10 rounded-md text-primary">
+                    <HardDriveDownload className="w-4 h-4" />
+                 </div>
+                 <span className="text-sm font-bold tracking-tight">Package Extractor</span>
+              </div>
+              <div className="flex gap-2">
+                <button 
+                  onClick={toggleSelectAll}
+                  disabled={isScanning || packages.length === 0}
+                  className={`px-3 py-1.5 border text-xs font-semibold rounded-md transition-all ${
+                    filteredPackages.length > 0 && filteredPackages.every(p => selectedIds.has(p.id))
+                      ? 'bg-primary text-white border-primary'
+                      : 'bg-secondary border-border text-slate-500 hover:border-slate-400'
+                  }`}
                 >
-                   <div className="flex items-center gap-3">
-                      <span className="text-xs font-bold text-foreground">
-                         {selectedIds.size} Targets selected
-                      </span>
-                   </div>
-                   <div className="flex gap-2">
-                     <button 
-                       onClick={() => setSelectedIds(new Set())}
-                       className="px-4 py-1.5 bg-secondary text-slate-600 text-xs font-semibold rounded-md hover:bg-slate-200 transition-all"
-                     >
-                        Cancel
-                     </button>
-                     <button 
-                       onClick={extractSelected}
-                       className="px-4 py-1.5 bg-primary text-white text-xs font-semibold rounded-md hover:opacity-90 transition-all shadow-sm shadow-primary/20"
-                     >
-                        Acquire APKs
-                     </button>
-                   </div>
-                </motion.div>
-             )}
+                   All
+                </button>
+                <button 
+                  onClick={scanAPKs}
+                  disabled={isScanning || isOffline}
+                  className="px-3 py-1.5 bg-primary text-white text-xs font-semibold rounded-md hover:opacity-90 transition-all disabled:opacity-50 shadow-sm shadow-primary/20"
+                >
+                  {isScanning ? "Scanning..." : "Scan"}
+                </button>
+              </div>
+            </div>
 
-             {filteredPackages.length > 0 ? filteredPackages.map((pkg, idx) => {
-                  const isSelected = selectedIds.has(pkg.id);
-
-                  return (
-                    <motion.div 
-                      key={idx} 
-                      onClick={() => !isOffline && toggleSelect(pkg.id)}
-                      className={`flex items-center justify-between p-3 rounded-md border transition-all cursor-pointer group ${
-                        isSelected ? 'border-primary bg-primary/5' : 'border-border hover:bg-secondary hover:border-slate-300'
-                      } ${isOffline ? 'opacity-40 grayscale-75 cursor-not-allowed border-dashed' : ''}`}
-                    >
-                      <div className="flex items-center gap-4 overflow-hidden">
-                         <div className={`p-2 rounded-md transition-all ${
-                           isSelected ? 'bg-primary text-white' : 
-                           'bg-secondary text-slate-400 group-hover:text-primary'
-                         }`}>
-                            <Cpu className="w-4 h-4" />
-                         </div>
-                         <div className="overflow-hidden">
-                            <div className="flex items-center gap-2">
-                               <p className={`text-xs font-bold truncate ${isSelected ? 'text-primary' : 'text-foreground'}`}>
-                                  {pkg.name}
-                               </p>
-                               {pkg.isSystem && (
-                                 <span className="px-1.5 py-0.5 bg-secondary rounded text-[8px] font-bold uppercase tracking-wider text-slate-400 border border-border">Sys</span>
-                               )}
-                            </div>
-                            <p className="text-[10px] font-medium text-slate-500 truncate lowercase">
-                               {pkg.id}
-                            </p>
-                         </div>
-                      </div>
-                      
-                      <div className="flex items-center gap-3">
-                        {pkg.status !== 'idle' && (
-                           <div className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase flex items-center gap-1.5 ${
-                             pkg.status === 'pulling' ? 'text-amber-500 animate-pulse' :
-                             pkg.status === 'success' ? 'text-emerald-500' :
-                             pkg.status === 'unavailable' ? 'text-slate-400' :
-                             'text-red-500'
-                           }`}>
-                              {pkg.status === 'pulling' ? <Zap className="w-2.5 h-2.5 animate-spin" /> : 
-                               pkg.status === 'success' ? <ShieldCheck className="w-2.5 h-2.5" /> :
-                               pkg.status === 'unavailable' ? <ShieldAlert className="w-2.5 h-2.5" /> :
-                               <ShieldAlert className="w-2.5 h-2.5" />}
-                              {pkg.status}
-                           </div>
-                        )}
-                        <div className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${
-                          isSelected ? 'bg-primary border-primary text-white' : 'border-border text-transparent'
-                        }`}>
-                           <ShieldCheck className="w-2.5 h-2.5" />
-                        </div>
-                      </div>
-                    </motion.div>
-                  );
-                }) : (
-               <div className="h-full flex flex-col items-center justify-center text-slate-600 p-20 space-y-4">
-                  <Cpu className="w-12 h-12 opacity-20" />
-                  <p className="text-[11px] font-bold uppercase tracking-widest opacity-40">Scan Required</p>
+            <div className="p-3 border-b border-border bg-secondary/50 space-y-3">
+               <div className="flex gap-2">
+                  {(['all', 'user', 'system'] as const).map(tab => (
+                     <button
+                       key={tab}
+                       onClick={() => setActiveTab(tab)}
+                       className={`flex-1 py-1.5 rounded-md text-[11px] font-semibold transition-all ${
+                         activeTab === tab ? 'bg-primary text-white shadow-sm' : 'bg-background border border-border text-slate-500 hover:bg-secondary'
+                       }`}
+                     >
+                        {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                     </button>
+                  ))}
                </div>
-             )}
+               <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                  <input 
+                    type="text" 
+                    placeholder="Filter by package..."
+                    value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
+                    className="w-full bg-background border border-border rounded-md py-2 pl-10 pr-4 text-xs focus:border-primary/50 outline-none transition-all placeholder:text-slate-500"
+                  />
+               </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-2 relative min-h-0">
+               {selectedIds.size > 0 && (
+                  <motion.div 
+                     initial={{ y: 20, opacity: 0 }}
+                     animate={{ y: 0, opacity: 1 }}
+                     className="sticky bottom-0 left-0 right-0 z-50 p-3 bg-background border-t border-border shadow-2xl flex items-center justify-between"
+                  >
+                     <span className="text-xs font-bold text-foreground">{selectedIds.size} Targets</span>
+                     <div className="flex gap-2">
+                       <button onClick={() => setSelectedIds(new Set())} className="px-3 py-1.5 bg-secondary text-slate-600 text-[10px] font-bold rounded hover:bg-slate-200">Cancel</button>
+                       <button onClick={extractSelected} className="px-3 py-1.5 bg-primary text-white text-[10px] font-bold rounded shadow-sm hover:opacity-90">Acquire</button>
+                     </div>
+                  </motion.div>
+               )}
+
+               {filteredPackages.length > 0 ? filteredPackages.map((pkg, idx) => {
+                    const isSelected = selectedIds.has(pkg.id);
+                    return (
+                      <motion.div 
+                        key={idx} 
+                        onClick={() => !isOffline && toggleSelect(pkg.id)}
+                        className={`flex items-center justify-between p-2.5 rounded-md border transition-all cursor-pointer group ${
+                          isSelected ? 'border-primary bg-primary/5' : 'border-border hover:bg-secondary hover:border-slate-300'
+                        } ${isOffline ? 'opacity-40 grayscale-75 cursor-not-allowed border-dashed' : ''}`}
+                      >
+                        <div className="flex items-center gap-3 overflow-hidden">
+                           <div className={`p-1.5 rounded-md transition-all ${isSelected ? 'bg-primary text-white' : 'bg-secondary text-slate-400 group-hover:text-primary'}`}>
+                              <Cpu className="w-3.5 h-3.5" />
+                           </div>
+                           <div className="overflow-hidden">
+                              <div className="flex items-center gap-2">
+                                 <p className={`text-[11px] font-bold truncate ${isSelected ? 'text-primary' : 'text-foreground'}`}>{pkg.name}</p>
+                                 {pkg.isSystem && <span className="px-1 py-0.5 bg-secondary rounded text-[7px] font-bold uppercase tracking-wider text-slate-400 border border-border">Sys</span>}
+                              </div>
+                              <p className="text-[9px] font-medium text-slate-500 truncate lowercase">{pkg.id}</p>
+                           </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {pkg.status !== 'idle' && (
+                             <div className={`px-1 py-0.5 rounded text-[8px] font-bold uppercase flex items-center gap-1 ${
+                               pkg.status === 'pulling' ? 'text-amber-500 animate-pulse' :
+                               pkg.status === 'success' ? 'text-emerald-500' :
+                               pkg.status === 'unavailable' ? 'text-slate-400' : 'text-red-500'
+                             }`}>
+                                {pkg.status === 'pulling' ? <Zap className="w-2 h-2 animate-spin" /> : 
+                                 pkg.status === 'success' ? <ShieldCheck className="w-2 h-2" /> :
+                                 pkg.status === 'unavailable' ? <ShieldAlert className="w-2 h-2" /> : <ShieldAlert className="w-2 h-2" />}
+                             </div>
+                          )}
+                          <div className={`w-3.5 h-3.5 rounded border flex items-center justify-center transition-all ${isSelected ? 'bg-primary border-primary text-white' : 'border-border text-transparent'}`}>
+                             <ShieldCheck className="w-2 h-2" />
+                          </div>
+                        </div>
+                      </motion.div>
+                    );
+                  }) : (
+                 <div className="h-full flex flex-col items-center justify-center text-slate-600 p-10 space-y-3">
+                    <Cpu className="w-8 h-8 opacity-20" />
+                    <p className="text-[10px] font-bold uppercase tracking-widest opacity-40">Scan Required</p>
+                 </div>
+               )}
+            </div>
+          </div>
+
+          <div className="bg-background/40 backdrop-blur-3xl p-5 rounded-lg border border-border shadow-md space-y-4">
+             <div className="flex items-center gap-3 border-b border-border pb-3 mb-2">
+                <div className="p-2 bg-primary/10 rounded-md text-primary">
+                   <Settings className="w-4 h-4" />
+                </div>
+                <span className="text-sm font-bold tracking-tight">System Operations</span>
+             </div>
+             
+             <div className="space-y-2">
+                <button onClick={() => launchAndroidComponent("com.android.settings/.DevelopmentSettings", "Developer Options")} disabled={isOffline} className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
+                   <div className="flex items-center gap-3 text-left">
+                      <Unlock className="w-4 h-4 text-slate-500 group-hover:text-primary" />
+                      <div>
+                         <p className="text-xs font-bold text-foreground">Bootloader / OEM Unlock</p>
+                         <p className="text-[9px] text-slate-500">Android Developer Settings</p>
+                      </div>
+                   </div>
+                   <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
+                </button>
+
+                <button onClick={() => launchAndroidComponent("com.mediatek.engineermode/.EngineerMode", "Engineer Mode")} disabled={isOffline} className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
+                   <div className="flex items-center gap-3 text-left">
+                      <Terminal className="w-4 h-4 text-slate-500 group-hover:text-primary" />
+                      <div>
+                         <p className="text-xs font-bold text-foreground">Root Privilege Escalation</p>
+                         <p className="text-[9px] text-slate-500">Mediatek user2root Menu</p>
+                      </div>
+                   </div>
+                   <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
+                </button>
+
+                <button onClick={disarmRootDetection} disabled={isOffline} className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
+                   <div className="flex items-center gap-3 text-left">
+                      <ShieldCheck className="w-4 h-4 text-slate-500 group-hover:text-primary" />
+                      <div>
+                         <p className="text-xs font-bold text-foreground">Disarm Root Detection</p>
+                         <p className="text-[9px] text-slate-500">Disable Bugsnag telemetry</p>
+                      </div>
+                   </div>
+                   <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
+                </button>
+             </div>
           </div>
         </div>
 
-        {/* COL 2: OTA + INFO */}
-        <div className="space-y-12">
-          {/* OTA CAPTURER */}
+        {/* === COLUMN 2: UPDATE MONITOR === */}
+        <div className="space-y-6">
+          <div className="bg-background/40 backdrop-blur-3xl p-5 rounded-lg border border-border shadow-md space-y-4">
+            <div className="flex items-center gap-3 border-b border-border pb-3 mb-2">
+               <div className="p-2 bg-primary/10 rounded-md text-primary">
+                  <Download className="w-4 h-4" />
+               </div>
+               <span className="text-sm font-bold tracking-tight">OTA Intelligence</span>
+            </div>
+            
+            <div className="space-y-2">
+              <select 
+                value={otaTarget}
+                onChange={(e) => setOtaTarget(e.target.value as any)}
+                className="w-full bg-background border border-border rounded-md p-3 text-xs focus:border-primary outline-none transition-all"
+              >
+                <option value="karoo1">Target: Karoo 1 (Gen 1)</option>
+                <option value="karoo2">Target: Karoo 2 (Gen 2 - Recommended)</option>
+                <option value="karoo3">Target: Karoo 3 (Gen 3)</option>
+                <option value="adb">Target: Connected Device (via ADB)</option>
+              </select>
+
+              <button 
+                onClick={checkLatestFirmware}
+                disabled={isOffline && otaTarget === "adb"}
+                className="w-full py-4 bg-primary text-white text-sm font-bold tracking-wide rounded-md hover:opacity-90 transition-all shadow-lg shadow-primary/20 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Zap className="w-4 h-4 fill-white" />
+                Download Latest Firmware
+              </button>
+            </div>
+
+            <div className="space-y-2 pt-2">
+                <button onClick={() => launchAndroidComponent("com.mediatek.systemupdate/.Main", "System Update Core")} disabled={isOffline} className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
+                   <div className="flex items-center gap-3 text-left">
+                      <Network className="w-4 h-4 text-slate-500 group-hover:text-primary" />
+                      <div>
+                         <p className="text-xs font-bold text-foreground">Force OTA Sync</p>
+                         <p className="text-[9px] text-slate-500">Bypass phased rollouts via MTK</p>
+                      </div>
+                   </div>
+                   <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
+                </button>
+
+                <button onClick={sideloadCustomOta} disabled={isOffline} className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
+                   <div className="flex items-center gap-3 text-left">
+                      <HardDriveDownload className="w-4 h-4 text-slate-500 group-hover:text-primary" />
+                      <div>
+                         <p className="text-xs font-bold text-foreground">Sideload Custom OTA</p>
+                         <p className="text-[9px] text-slate-500">Push & install local .zip via Intent</p>
+                      </div>
+                   </div>
+                   <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
+                </button>
+            </div>
+          </div>
+
           <div className="bg-background/40 backdrop-blur-3xl rounded-lg overflow-hidden border border-border shadow-lg">
             <div className="p-4 border-b border-border bg-secondary flex items-center justify-between">
                <div className="flex items-center gap-3">
                   <div className="p-2 bg-primary/10 rounded-md text-primary">
                      <Network className="w-4 h-4" />
                   </div>
-                  <span className="text-sm font-bold tracking-tight">Update Monitor</span>
+                  <span className="text-sm font-bold tracking-tight">Logcat Monitor</span>
                </div>
-               <div className="flex gap-2">
-                 <button 
-                   onClick={testOTA}
-                   className="px-4 py-1.5 bg-background border border-border text-slate-500 text-xs font-semibold rounded-md hover:bg-secondary transition-all"
-                 >
-                    Test Engine
-                 </button>
-               </div>
+               <button onClick={testOTA} className="px-3 py-1 bg-background border border-border text-slate-500 text-[10px] font-bold rounded hover:bg-secondary transition-all">Test</button>
             </div>
-            <div className="p-6 space-y-6">
-               <div className="p-4 bg-primary/5 rounded-md border border-primary/10 flex items-start gap-4">
-                  <ShieldAlert className="w-4 h-4 text-primary shrink-0 mt-0.5" />
-                  <div className="space-y-1">
-                     <p className="text-xs font-bold text-foreground">How to intercept:</p>
-                     <p className="text-[11px] text-slate-500 font-medium leading-relaxed">Click "Begin Scan" and then press "Check for Updates" in the Karoo settings. Nexus will monitor the debug stream for URLs.</p>
-                  </div>
-               </div>
-
+            <div className="p-5 space-y-4">
                <button 
                   onClick={captureOTA}
                   disabled={isCapturing || isOffline}
-                  className={`w-full py-4 rounded-md font-bold text-sm transition-all flex items-center justify-center gap-2 ${
-                    isCapturing || isOffline ? 'bg-secondary text-slate-400 cursor-not-allowed border border-border' : 'bg-primary text-white hover:opacity-90 shadow-lg shadow-primary/20'
+                  className={`w-full py-3 rounded-md font-bold text-xs transition-all flex items-center justify-center gap-2 ${
+                    isCapturing || isOffline ? 'bg-secondary text-slate-400 cursor-not-allowed border border-border' : 'bg-primary/20 text-primary hover:bg-primary hover:text-white border border-primary/30'
                   }`}
                 >
-                  {isCapturing ? <Terminal className="w-4 h-4 animate-spin" /> : 
-                   isOffline ? <ShieldAlert className="w-4 h-4" /> :
-                   <Search className="w-4 h-4" />}
-                  {isCapturing ? "Awaiting Data..." : 
-                   isOffline ? "Connection Required" :
-                   "Start Monitoring"}
+                  {isCapturing ? <Terminal className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                  {isCapturing ? "Awaiting Data..." : "Start Stream Interception"}
                 </button>
 
-               <div className="space-y-3 min-h-[300px]">
+               <div className="space-y-3 min-h-[200px] max-h-[300px] overflow-y-auto custom-scrollbar pr-2">
                   {capturedLinks.length > 0 ? capturedLinks.map((link, i) => (
-                    <motion.div 
-                      key={i}
-                      initial={{ opacity: 0, scale: 0.98 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      className="p-4 bg-background border border-border rounded-lg space-y-3 relative overflow-hidden group shadow-sm"
-                    >
+                    <motion.div key={i} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-3 bg-background border border-border rounded-lg space-y-2 shadow-sm">
                        <div className="flex items-center justify-between">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Detected Stream Link</span>
+                          <span className="text-[9px] font-bold text-primary uppercase tracking-wider">Detected Link</span>
                           <div className="flex gap-2">
-                            <button 
-                              onClick={() => fetchAndDownloadOTA(link.match(/https?:\/\/[^\s]+/)?.[0] || link)}
-                              className="text-[10px] font-bold bg-primary/10 text-primary px-3 py-1 rounded hover:bg-primary hover:text-white transition-all"
-                            >
-                               Archive
-                            </button>
-                            <button 
-                              onClick={() => {
-                                navigator.clipboard.writeText(link.match(/https?:\/\/[^\s]+/)?.[0] || link);
-                                logInteraction("Copied OTA link to clipboard");
-                              }}
-                              className="text-[10px] font-bold bg-secondary text-slate-500 px-3 py-1 rounded hover:bg-slate-200 transition-all"
-                            >
-                               Copy
-                            </button>
+                            <button onClick={() => fetchAndDownloadOTA(link.match(/https?:\/\/[^\s]+/)?.[0] || link)} className="text-[9px] font-bold bg-primary/10 text-primary px-2 py-1 rounded hover:bg-primary hover:text-white">Archive</button>
+                            <button onClick={() => navigator.clipboard.writeText(link.match(/https?:\/\/[^\s]+/)?.[0] || link)} className="text-[9px] font-bold bg-secondary text-slate-500 px-2 py-1 rounded hover:bg-slate-200">Copy</button>
                           </div>
                        </div>
-                       <p className="text-[11px] font-mono text-slate-600 dark:text-slate-400 break-all leading-relaxed bg-secondary/50 p-3 rounded-md">
-                          {link}
-                       </p>
+                       <p className="text-[10px] font-mono text-slate-500 break-all bg-secondary/50 p-2 rounded-md leading-relaxed">{link}</p>
                     </motion.div>
                   )) : (
-                    <div className="h-[300px] flex flex-col items-center justify-center text-slate-400 space-y-4 border-2 border-dashed border-secondary rounded-lg">
-                       <Terminal className="w-10 h-10 opacity-10" />
-                       <p className="text-[11px] font-bold uppercase tracking-widest opacity-30 italic">Awaiting OTA Signal</p>
+                    <div className="h-[200px] flex flex-col items-center justify-center text-slate-400 space-y-3 border border-dashed border-border rounded-lg">
+                       <Terminal className="w-8 h-8 opacity-20" />
+                       <p className="text-[10px] font-bold uppercase tracking-widest opacity-40 italic">Awaiting Logcat Signal</p>
                     </div>
                   )}
                </div>
             </div>
           </div>
+        </div>
 
-          <TacticalDownloader 
-            isOpen={downloaderOpen}
-            onClose={() => setDownloaderOpen(false)}
-            fileName={activeFileName}
-            url={activeDownloadUrl || ""}
-          />
-
-          {/* ENGINEERING CORE */}
-          <div className="bg-background/40 backdrop-blur-3xl p-6 rounded-lg border border-border shadow-md space-y-6">
-             <div className="flex items-center gap-3 border-b border-border pb-4">
-                <div className="p-2 bg-primary/10 rounded-md text-primary">
-                   <Settings className="w-4 h-4" />
-                </div>
-                <span className="text-sm font-bold tracking-tight">Engineering Core</span>
-             </div>
-             
-             <div className="space-y-3">
-                <button 
-                  onClick={() => launchAndroidComponent("com.android.settings/.DevelopmentSettings", "Developer Options")}
-                  disabled={isOffline}
-                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
-                >
+        {/* === COLUMN 3: MAP MANAGEMENT === */}
+        <div className="space-y-6">
+          <div className="bg-background/40 backdrop-blur-3xl p-5 rounded-lg border border-border shadow-md space-y-5">
+            <div className="flex items-center gap-3 border-b border-border pb-3">
+               <div className="p-2 bg-primary/10 rounded-md text-primary">
+                  <Map className="w-4 h-4" />
+               </div>
+               <span className="text-sm font-bold tracking-tight">Map Management</span>
+            </div>
+            
+            <div className="space-y-2">
+                <button onClick={injectCustomMap} disabled={isOffline} className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
                    <div className="flex items-center gap-3 text-left">
-                      <Unlock className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
-                      <div>
-                         <p className="text-xs font-bold text-foreground">Bootloader / OEM Unlock</p>
-                         <p className="text-[10px] text-slate-500 font-medium">Launch Android Developer Settings</p>
-                      </div>
-                   </div>
-                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
-                </button>
-
-                <button 
-                  onClick={() => launchAndroidComponent("com.mediatek.engineermode/.EngineerMode", "Engineer Mode")}
-                  disabled={isOffline}
-                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                   <div className="flex items-center gap-3 text-left">
-                      <Terminal className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
-                      <div>
-                         <p className="text-xs font-bold text-foreground">Root Privilege Escalation</p>
-                         <p className="text-[10px] text-slate-500 font-medium">Launch Mediatek user2root Menu</p>
-                      </div>
-                   </div>
-                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
-                </button>
-
-                <button 
-                  onClick={() => launchAndroidComponent("com.mediatek.systemupdate/.Main", "System Update Core")}
-                  disabled={isOffline}
-                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                   <div className="flex items-center gap-3 text-left">
-                      <Network className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
-                      <div>
-                         <p className="text-xs font-bold text-foreground">Force OTA Synchronization</p>
-                         <p className="text-[10px] text-slate-500 font-medium">Bypass phased rollouts via MTK Update Core</p>
-                      </div>
-                   </div>
-                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
-                </button>
-
-                <button 
-                  onClick={injectCustomMap}
-                  disabled={isOffline}
-                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                   <div className="flex items-center gap-3 text-left">
-                      <Map className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
+                      <Map className="w-4 h-4 text-slate-500 group-hover:text-primary" />
                       <div>
                          <p className="text-xs font-bold text-foreground">Custom Map Injector</p>
-                         <p className="text-[10px] text-slate-500 font-medium">SQLite file_request_table patcher (Root Required)</p>
+                         <p className="text-[9px] text-slate-500">SQLite Patcher (Root Req)</p>
                       </div>
                    </div>
-                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
+                   <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
                 </button>
+            </div>
 
-                <button 
-                  onClick={sideloadCustomOta}
-                  disabled={isOffline}
-                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
-                >
+            <div className="pt-5 border-t border-border space-y-4">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Proxy Operations (Non-Root)</span>
+                
+                <div className="p-3 bg-primary/5 rounded-md border border-primary/10 flex items-start gap-3">
+                    <ShieldAlert className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+                    <p className="text-[10px] text-slate-500 font-medium leading-relaxed">
+                       Proxy forces device traffic through PC to intercept map downloads. Requires custom CA certificate for strict HTTPS.
+                    </p>
+                </div>
+
+                <div className="flex gap-3">
+                    {!isProxyRunning ? (
+                      <button onClick={startMapProxy} disabled={isOffline} className="flex-1 flex items-center justify-center gap-2 py-3 bg-primary text-white text-xs font-bold rounded-md hover:opacity-90 transition-all disabled:opacity-50 shadow-md shadow-primary/20">
+                        <Map className="w-4 h-4" /> Start Proxy
+                      </button>
+                    ) : (
+                      <button onClick={stopMapProxy} disabled={isOffline} className="flex-1 flex items-center justify-center gap-2 py-3 bg-red-500 text-white text-xs font-bold rounded-md hover:bg-red-600 transition-all shadow-md shadow-red-500/20">
+                        <ShieldAlert className="w-4 h-4" /> Stop Proxy
+                      </button>
+                    )}
+                </div>
+
+                <button onClick={generateCaCert} disabled={isOffline} className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
                    <div className="flex items-center gap-3 text-left">
-                      <HardDriveDownload className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
+                      <ShieldCheck className="w-4 h-4 text-slate-500 group-hover:text-primary" />
                       <div>
-                         <p className="text-xs font-bold text-foreground">Sideload Custom OTA</p>
-                         <p className="text-[10px] text-slate-500 font-medium">Push and install local .zip via Broadcaster Intent</p>
+                         <p className="text-xs font-bold text-foreground">Push Root CA</p>
+                         <p className="text-[9px] text-slate-500">Bypass HTTPS certificate pinning</p>
                       </div>
                    </div>
-                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
+                   <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
                 </button>
-
-                <button 
-                  onClick={disarmRootDetection}
-                  disabled={isOffline}
-                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                   <div className="flex items-center gap-3 text-left">
-                      <ShieldCheck className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
-                      <div>
-                         <p className="text-xs font-bold text-foreground">Disarm Root Detection</p>
-                         <p className="text-[10px] text-slate-500 font-medium">Disable Bugsnag telemetry & hide SU binary presence</p>
-                      </div>
-                   </div>
-                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
-                </button>
-              </div>
-           </div>
-
-           {/* MAP PROXY CORE */}
-           <div className="bg-background/40 backdrop-blur-3xl p-6 rounded-lg border border-border shadow-md space-y-6">
-              <div className="flex items-center gap-3 border-b border-border pb-4">
-                 <div className="p-2 bg-primary/10 rounded-md text-primary">
-                    <Network className="w-4 h-4" />
-                 </div>
-                 <span className="text-sm font-bold tracking-tight">Map Proxy Engine (Non-Root)</span>
-              </div>
-              
-              <div className="p-4 bg-primary/5 rounded-md border border-primary/10 flex items-start gap-4">
-                  <ShieldAlert className="w-4 h-4 text-primary shrink-0 mt-0.5" />
-                  <div className="space-y-1">
-                     <p className="text-xs font-bold text-foreground">Proxy Warning:</p>
-                     <p className="text-[11px] text-slate-500 font-medium leading-relaxed">This mode forces device traffic through your PC to intercept the map download. If the device uses strict HTTPS for maps, you may need to install a custom CA certificate later.</p>
-                  </div>
-              </div>
-
-              <div className="flex gap-4">
-                  {!isProxyRunning ? (
-                    <button 
-                      onClick={startMapProxy}
-                      disabled={isOffline}
-                      className="flex-1 flex items-center justify-center gap-2 py-3 bg-primary text-white text-xs font-semibold rounded-md hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-primary/20"
-                    >
-                      <Map className="w-4 h-4" />
-                      Start Tactical Proxy
-                    </button>
-                  ) : (
-                    <button 
-                      onClick={stopMapProxy}
-                      disabled={isOffline}
-                      className="flex-1 flex items-center justify-center gap-2 py-3 bg-red-500 text-white text-xs font-semibold rounded-md hover:bg-red-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-red-500/20"
-                    >
-                      <ShieldAlert className="w-4 h-4" />
-                      Stop Proxy Engine
-                    </button>
-                  )}
-              </div>
-              <button 
-                onClick={generateCaCert}
-                disabled={isOffline}
-                className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                 <div className="flex items-center gap-3 text-left">
-                    <ShieldCheck className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
-                    <div>
-                       <p className="text-xs font-bold text-foreground">Generate & Push Root CA</p>
-                       <p className="text-[10px] text-slate-500 font-medium">Bypass HTTPS certificate pinning for Map interception</p>
-                    </div>
-                 </div>
-                 <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
-              </button>
-           </div>
+            </div>
+          </div>
         </div>
+
+      </div>
+
+      <TacticalDownloader 
+        isOpen={downloaderOpen}
+        onClose={() => setDownloaderOpen(false)}
+        fileName={activeFileName}
+        url={activeDownloadUrl || ""}
+      />
+
+      {/* FLOATING ACTION LOGS */}
+      <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2 w-80 pointer-events-none">
+        {logs.map(log => (
+          <motion.div
+            key={log.id}
+            initial={{ opacity: 0, x: 20, scale: 0.95 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.9 }}
+            className="bg-secondary border border-border text-foreground p-3 rounded-md shadow-2xl flex flex-col pointer-events-auto"
+          >
+            <div className="flex justify-between items-center mb-1">
+              <span className="text-[10px] font-bold text-primary tracking-wider">SYSTEM EVENT</span>
+              <span className="text-[10px] text-slate-500">{log.time.toLocaleTimeString()}</span>
+            </div>
+            <p className="text-xs break-words leading-relaxed">{log.msg.replace('INVESTIGATION :: ', '')}</p>
+          </motion.div>
+        ))}
       </div>
     </div>
   );

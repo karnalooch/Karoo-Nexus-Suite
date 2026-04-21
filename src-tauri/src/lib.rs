@@ -111,10 +111,7 @@ async fn download_firmware(app: tauri::AppHandle, url: String, local_path: Strin
     let response = client.get(url.clone())
         .send()
         .await
-        .map_err(|e| {
-            let _ = app.emit("firmware-download-error", e.to_string());
-            e.to_string()
-        })?;
+        .map_err(|e| e.to_string())?;
 
     let status = response.status();
     log_to_nexus(&app, format!("DEBUG :: Server Status: {}", status));
@@ -123,7 +120,6 @@ async fn download_firmware(app: tauri::AppHandle, url: String, local_path: Strin
         let err_text = response.text().await.unwrap_or_else(|_| "Could not read error body".to_string());
         log_to_nexus(&app, format!("DEBUG :: Server Error Body: {}", err_text));
         let err_msg = format!("Download failed with status {}: {}", status, err_text);
-        let _ = app.emit("firmware-download-error", err_msg.clone());
         return Err(err_msg);
     }
 
@@ -466,6 +462,22 @@ async fn generate_ca_cert(app: tauri::AppHandle) -> Result<String, String> {
     }
 }
 
+#[tauri::command]
+async fn get_device_id(app: tauri::AppHandle) -> Result<String, String> {
+    let output = app.shell()
+        .command(&adb_path())
+        .args(["get-serialno"])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -490,6 +502,7 @@ pub fn run() {
             start_map_proxy,
             stop_map_proxy,
             generate_ca_cert,
+            get_device_id,
             activity::sync_activities,
             activity::analyze_fit_file
         ])
