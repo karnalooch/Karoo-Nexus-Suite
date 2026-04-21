@@ -375,6 +375,38 @@ export default function InvestigationPage() {
     }
   };
 
+  const [isProxyRunning, setIsProxyRunning] = useState(false);
+
+  const startMapProxy = async () => {
+    if (isOffline) return;
+    try {
+      const file = await open({
+        multiple: false,
+        title: "Select Tactical Map Payload (.zip / .mbtiles)",
+        filters: [{ name: "Map Data", extensions: ["zip", "mbtiles"] }]
+      });
+      if (!file) return;
+      logInteraction(`INVESTIGATION :: Starting Proxy for Map: ${file}`);
+      const res = await invoke("start_map_proxy", { localPath: file });
+      logInteraction(`INVESTIGATION :: Proxy Started :: ${res}`);
+      setIsProxyRunning(true);
+    } catch (e) {
+      logInteraction(`INVESTIGATION :: Proxy Start Failed :: ${e}`);
+    }
+  };
+
+  const stopMapProxy = async () => {
+    if (isOffline) return;
+    try {
+      logInteraction(`INVESTIGATION :: Stopping Proxy...`);
+      const res = await invoke("stop_map_proxy");
+      logInteraction(`INVESTIGATION :: Proxy Stopped :: ${res}`);
+      setIsProxyRunning(false);
+    } catch (e) {
+      logInteraction(`INVESTIGATION :: Proxy Stop Failed :: ${e}`);
+    }
+  };
+
   const filteredPackages = packages.filter(p => {
     const matchesFilter = p.id.toLowerCase().includes(filter.toLowerCase()) || p.name.toLowerCase().includes(filter.toLowerCase());
     const matchesTab = activeTab === 'all' || (activeTab === 'user' && !p.isSystem) || (activeTab === 'system' && p.isSystem);
@@ -736,9 +768,48 @@ export default function InvestigationPage() {
                    </div>
                    <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
                 </button>
-             </div>
-          </div>
+              </div>
+           </div>
 
+           {/* MAP PROXY CORE */}
+           <div className="bg-background/40 backdrop-blur-3xl p-6 rounded-lg border border-border shadow-md space-y-6">
+              <div className="flex items-center gap-3 border-b border-border pb-4">
+                 <div className="p-2 bg-primary/10 rounded-md text-primary">
+                    <Network className="w-4 h-4" />
+                 </div>
+                 <span className="text-sm font-bold tracking-tight">Map Proxy Engine (Non-Root)</span>
+              </div>
+              
+              <div className="p-4 bg-primary/5 rounded-md border border-primary/10 flex items-start gap-4">
+                  <ShieldAlert className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                     <p className="text-xs font-bold text-foreground">Proxy Warning:</p>
+                     <p className="text-[11px] text-slate-500 font-medium leading-relaxed">This mode forces device traffic through your PC to intercept the map download. If the device uses strict HTTPS for maps, you may need to install a custom CA certificate later.</p>
+                  </div>
+              </div>
+
+              <div className="flex gap-4">
+                  {!isProxyRunning ? (
+                    <button 
+                      onClick={startMapProxy}
+                      disabled={isOffline}
+                      className="flex-1 flex items-center justify-center gap-2 py-3 bg-primary text-white text-xs font-semibold rounded-md hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-primary/20"
+                    >
+                      <Map className="w-4 h-4" />
+                      Start Tactical Proxy
+                    </button>
+                  ) : (
+                    <button 
+                      onClick={stopMapProxy}
+                      disabled={isOffline}
+                      className="flex-1 flex items-center justify-center gap-2 py-3 bg-red-500 text-white text-xs font-semibold rounded-md hover:bg-red-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-red-500/20"
+                    >
+                      <ShieldAlert className="w-4 h-4" />
+                      Stop Proxy Engine
+                    </button>
+                  )}
+              </div>
+           </div>
         </div>
       </div>
     </div>
