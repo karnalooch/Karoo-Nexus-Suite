@@ -18,33 +18,51 @@ interface AppInfo {
 }
 
 const prettifyPackageName = (id: string): string => {
+  if (!id || id === "unknown.package" || id === "unknown") return "Service Package";
   if (id === "android") return "Android System";
   
   // High-priority Karoo branding
   if (id.includes("io.hammerhead")) {
-    let sub = id.replace("io.hammerhead.", "");
+    const sub = id.replace("io.hammerhead.", "");
     if (sub === "profileconfiguratorapp") return "Profile Configurator";
     if (sub === "karoo.companion") return "Karoo Companion";
+    if (sub === "settings.extensions") return "Settings Extensions";
+    if (sub === "shell") return "Nexus Shell";
+    if (sub.includes("service")) return sub.split('.').pop()?.replace("service", " Service") || "Karoo Service";
   }
 
-  // Remove generic prefixes
-  let name = id.replace(/^(com|io|net|org|android)\.(android|google|hammerhead|karoo|mediatek|qualcomm|sunmi|zx|skylite)\./, "");
+  // Handle common android namespaces more gracefully
+  let name = id;
+  if (id.includes(".providers.")) name = id.split(".providers.").pop() || id;
+  else if (id.includes(".services.")) name = id.split(".services.").pop() || id;
+  else if (id.includes(".inputmethod.")) name = id.split(".inputmethod.").pop() || id;
+  else {
+    // Remove broad technical prefixes
+    name = id.replace(/^(com|io|net|org|android)\.(android|google|hammerhead|karoo|mediatek|qualcomm|sunmi|zx|skylite|tinyroom|vending|chrome)\./, "");
+  }
   
+  // Take last segment if dots still exist
   if (name.includes(".")) {
     name = name.split(".").pop() || name;
   }
 
-  // Clean separators
-  name = name.replace(/[_-]/g, " ");
+  // Transform separators and CamelCase
+  name = name.replace(/[_-]/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2");
   
-  // CamelCase split
-  name = name.replace(/([a-z])([A-Z])/g, "$1 $2");
-  
-  // Title Case
-  return name.split(" ").map(word => {
+  // Clean up and Title Case
+  const finalName = name.split(" ").map(word => {
     if (word.length === 0) return "";
     return word.charAt(0).toUpperCase() + word.slice(1);
-  }).join(" ").trim() || "Unknown Package";
+  }).join(" ").trim();
+
+  // Robust Fallback: if result is empty or too short, use the last segment of the original ID
+  if (!finalName || finalName.length < 2) {
+    const segments = id.split(".");
+    const lastSegment = segments[segments.length - 1];
+    return lastSegment.charAt(0).toUpperCase() + lastSegment.slice(1);
+  }
+
+  return finalName;
 };
 
 export default function InvestigationPage() {

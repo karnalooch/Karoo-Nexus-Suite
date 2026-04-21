@@ -20,7 +20,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${inter.variable} font-sans antialiased min-h-screen bg-background text-foreground transition-all duration-500 overflow-hidden`}>
+      <body className={`${inter.variable} font-sans antialiased min-h-screen bg-background text-foreground transition-all duration-200 overflow-hidden`}>
         {/* WINDOWS 11 MICA BACKGROUND LAYER */}
         <div className="fixed inset-0 pointer-events-none z-[-1] opacity-60 dark:opacity-40">
            <div className="absolute inset-0 bg-gradient-to-tr from-primary/10 via-transparent to-primary/5" />
