@@ -437,12 +437,15 @@ async fn stop_map_proxy(app: tauri::AppHandle) -> Result<String, String> {
 async fn generate_ca_cert(app: tauri::AppHandle) -> Result<String, String> {
     log_interaction(app.clone(), "Generating Nexus Root CA Certificate".to_string()).await;
     
-    let mut params = rcgen::CertificateParams::new(Vec::new()).map_err(|e| e.to_string())?;
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    params.distinguished_name.push(rcgen::DnType::CommonName, "Karoo Nexus Interception CA");
+    let mut dn = rcgen::DistinguishedName::new();
+    dn.push(rcgen::DnType::CommonName, "Karoo Nexus Interception CA");
+    params.distinguished_name = dn;
     
-    let cert = rcgen::Certificate::from_params(params).map_err(|e| e.to_string())?;
-    let crt_pem = cert.serialize_pem().map_err(|e| e.to_string())?;
+    let key_pair = rcgen::KeyPair::generate().map_err(|e| e.to_string())?;
+    let cert = params.self_signed(&key_pair).map_err(|e| e.to_string())?;
+    let crt_pem = cert.pem();
     
     // Write to a temporary file locally
     let local_path = std::env::temp_dir().join("KarooNexusRootCA.crt");

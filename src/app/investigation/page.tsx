@@ -407,6 +407,17 @@ export default function InvestigationPage() {
     }
   };
 
+  const generateCaCert = async () => {
+    if (isOffline) return;
+    try {
+      logInteraction(`INVESTIGATION :: Generating and pushing CA Certificate...`);
+      const res = await invoke("generate_ca_cert");
+      logInteraction(`INVESTIGATION :: CA Cert Generation Result: ${res}`);
+    } catch (e) {
+      logInteraction(`INVESTIGATION :: CA Cert Generation Failed :: ${e}`);
+    }
+  };
+
   const filteredPackages = packages.filter(p => {
     const matchesFilter = p.id.toLowerCase().includes(filter.toLowerCase()) || p.name.toLowerCase().includes(filter.toLowerCase());
     const matchesTab = activeTab === 'all' || (activeTab === 'user' && !p.isSystem) || (activeTab === 'system' && p.isSystem);
@@ -809,6 +820,20 @@ export default function InvestigationPage() {
                     </button>
                   )}
               </div>
+              <button 
+                onClick={generateCaCert}
+                disabled={isOffline}
+                className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                 <div className="flex items-center gap-3 text-left">
+                    <ShieldCheck className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
+                    <div>
+                       <p className="text-xs font-bold text-foreground">Generate & Push Root CA</p>
+                       <p className="text-[10px] text-slate-500 font-medium">Bypass HTTPS certificate pinning for Map interception</p>
+                    </div>
+                 </div>
+                 <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
+              </button>
            </div>
         </div>
       </div>
