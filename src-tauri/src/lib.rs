@@ -433,6 +433,36 @@ async fn stop_map_proxy(app: tauri::AppHandle) -> Result<String, String> {
     Ok("Proxy routing neutralized. Direct connection restored.".to_string())
 }
 
+#[tauri::command]
+async fn generate_ca_cert(app: tauri::AppHandle) -> Result<String, String> {
+    log_interaction(app.clone(), "Generating Nexus Root CA Certificate".to_string()).await;
+    
+    let mut params = rcgen::CertificateParams::new(Vec::new()).map_err(|e| e.to_string())?;
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params.distinguished_name.push(rcgen::DnType::CommonName, "Karoo Nexus Interception CA");
+    
+    let cert = rcgen::Certificate::from_params(params).map_err(|e| e.to_string())?;
+    let crt_pem = cert.serialize_pem().map_err(|e| e.to_string())?;
+    
+    // Write to a temporary file locally
+    let local_path = std::env::temp_dir().join("KarooNexusRootCA.crt");
+    std::fs::write(&local_path, crt_pem).map_err(|e| e.to_string())?;
+    
+    // Push to Karoo
+    let remote_path = "/sdcard/Download/KarooNexusRootCA.crt";
+    let local_path_str = local_path.to_string_lossy().to_string();
+    let args_push = ["push", &local_path_str, remote_path];
+    
+    log_adb(&app, &args_push);
+    let output_push = app.shell().command(&adb_path()).args(args_push).output().await.map_err(|e| e.to_string())?;
+    
+    if output_push.status.success() {
+        Ok("CA Certificate generated and pushed to /sdcard/Download/KarooNexusRootCA.crt. Please install it via Karoo Settings -> Security -> Install from storage.".to_string())
+    } else {
+        Err(format!("Failed to push CA Certificate: {}", String::from_utf8_lossy(&output_push.stderr)))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -456,6 +486,7 @@ pub fn run() {
             disarm_root_detection,
             start_map_proxy,
             stop_map_proxy,
+            generate_ca_cert,
             activity::sync_activities,
             activity::analyze_fit_file
         ])
