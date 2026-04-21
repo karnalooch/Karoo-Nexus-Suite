@@ -1,30 +1,36 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Smartphone, ShieldCheck, HardDrive, Cpu, Activity, Zap, ArrowRight, Search } from "lucide-react";
+import { Smartphone, ShieldCheck, HardDrive, Cpu, Activity, Zap, ArrowRight, Search, ShieldAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import Link from "next/link";
+import { useNexus } from "@/context/NexusContext";
 
 const TARGET_FIRMWARE = "1.352.1409.3";
 
-function StatCard({ label, value, icon: Icon, accent = false, pulse = false, onClick }: {
-  label: string; value: string; icon: React.ElementType; accent?: boolean; pulse?: boolean; onClick?: () => void;
+function StatCard({ label, value, icon: Icon, accent = false, pulse = false, onClick, disabled = false }: {
+  label: string; value: string; icon: React.ElementType; accent?: boolean; pulse?: boolean; onClick?: () => void; disabled?: boolean;
 }) {
   return (
     <div 
-      onClick={onClick}
-      className={`glass-card p-8 rounded-3xl flex items-center gap-6 group transition-all hover:translate-y-[-2px] cursor-pointer ${accent ? "border-primary/30" : ""}`}
+      onClick={!disabled ? onClick : undefined}
+      className={`glass-card p-6 rounded-lg flex items-center gap-4 transition-all relative overflow-hidden ${
+        accent && !disabled ? "border-primary/50" : "border-border shadow-sm"
+      } ${disabled ? "opacity-50 grayscale cursor-not-allowed" : "hover:bg-white/10 cursor-pointer active:scale-[0.98]"}`}
     >
-      <div className={`p-4 rounded-2xl relative ${accent ? "bg-primary/20 text-primary" : "bg-white/5 text-slate-400"}`}>
-        <Icon className="w-7 h-7" />
-        {pulse && <div className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />}
+      <div className={`p-3 rounded-md ${accent && !disabled ? "bg-primary text-white" : "bg-secondary text-slate-500"}`}>
+        <Icon className="w-5 h-5" />
       </div>
       <div>
-        <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</p>
-        <p className="text-2xl font-black uppercase italic tracking-tight mt-0.5">{value}</p>
+        <p className="text-[11px] font-medium text-slate-500">{label}</p>
+        <p className="text-lg font-bold tracking-tight">{value}</p>
       </div>
+      {disabled && (
+        <div className="absolute inset-0 bg-background/20 backdrop-blur-[1px] flex items-center justify-center">
+           <ShieldAlert className="w-4 h-4 text-slate-500/50" />
+        </div>
+      )}
     </div>
   );
 }
@@ -32,234 +38,115 @@ function StatCard({ label, value, icon: Icon, accent = false, pulse = false, onC
 const QUICK_LINKS = [
   { href: "/software", icon: Zap, label: "Software Hub", desc: "Sideload extensions to your Karoo" },
   { href: "/activities", icon: Activity, label: "Activity Pulse", desc: "Sync and analyze FIT sessions" },
-  { href: "/investigation", icon: Search, label: "Tactical Investigation", desc: "Extract APKs and capture OTA links" },
+  { href: "/investigation", icon: Search, label: "System Analysis", desc: "Extract APKs and capture system links" },
 ];
 
 export default function Dashboard() {
-  const [adbStatus, setAdbStatus] = useState("Disconnected");
-  const [deviceInfo, setDeviceInfo] = useState<string | null>(null);
-  const [logs, setLogs] = useState<string[]>(["Neural Core Initialized...", "Awaiting Device Pulse..."]);
+  const { adbStatus, deviceInfo, logs, clearLogs } = useNexus();
+  const isOffline = adbStatus !== "Online";
 
-  const addLog = (msg: string) => {
-    setLogs(prev => {
-      if (prev.length > 0) {
-        const last = prev[0];
-        // Clean the last message from its (xN) suffix to compare correctly
-        const lastMsgClean = last.split("] ").slice(1).join("] ").replace(/\s\(x\d+\)$/, "");
-        
-        if (lastMsgClean === msg) {
-          // Extract existing count or start at 1
-          const match = last.match(/\(x(\d+)\)$/);
-          const count = match ? parseInt(match[1]) + 1 : 2;
-          const newEntry = `[${new Date().toLocaleTimeString()}] ${msg} (x${count})`;
-          return [newEntry, ...prev.slice(1)];
-        }
-      }
-      return [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev].slice(0, 30);
-    });
+  const logInteraction = async (action: string) => {
+    try {
+      await invoke("log_interaction", { action: `USER :: ${action}` });
+    } catch (e) {}
   };
-  
-  const clearLogs = () => setLogs(["Neural Core Reset...", "Awaiting Device Pulse..."]);
-  const logInteraction = (action: string) => addLog(`USER :: ${action}`);
-
-  // Detect if running inside Tauri desktop app
-  const isTauri = () => typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
-
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-
-    async function setupListener() {
-      if (!isTauri()) return;
-      unlisten = await listen("nexus-log", (event) => {
-        addLog(event.payload as string);
-      });
-    }
-
-    setupListener();
-
-    if (!isTauri()) {
-      setAdbStatus("Dev Mode");
-      addLog("Browser env detected — Tauri IPC unavailable");
-      addLog("Launch via: cargo tauri dev");
-      return;
-    }
-
-    const checkConnection = async () => {
-      try {
-        const devices = await invoke("check_adb_connection") as string;
-        if (devices.includes("\tdevice")) {
-          if (adbStatus !== "Online") {
-            setAdbStatus("Online");
-            addLog("Device Detected: HH-KAROO-X — Channel Open");
-            const info = await invoke("get_karoo_info") as string;
-            setDeviceInfo(info);
-            
-            if (info === TARGET_FIRMWARE) {
-              addLog("SYSTEM :: Target 1.352.1409.3 Verified — Gold Standard Compliance");
-            } else {
-              addLog(`SYSTEM :: Detected ${info} — Version Drift noted from target 1.352.1409.3`);
-            }
-          }
-        } else {
-          if (adbStatus === "Online") addLog("Neural Link Lost — Awaiting Reconnect...");
-          setAdbStatus("Disconnected");
-          setDeviceInfo(null);
-        }
-      } catch (e) {
-        if (adbStatus !== "Error") addLog("ADB Daemon Error — Check Installation");
-        setAdbStatus("Error");
-      }
-    };
-    const interval = setInterval(checkConnection, 3000);
-    checkConnection();
-    return () => {
-      clearInterval(interval);
-      if (unlisten) unlisten();
-    };
-  }, [adbStatus]);
-
-  const statusColor = adbStatus === "Online" ? "text-emerald-400" 
-    : adbStatus === "Error" ? "text-red-400" 
-    : adbStatus === "Dev Mode" ? "text-blue-400"
-    : "text-slate-500";
-    
-  const isCompliant = deviceInfo === TARGET_FIRMWARE;
 
   return (
-    <div className="p-12 max-w-[1600px] mx-auto space-y-12">
-      {/* PAGE HEADER */}
+    <div className="max-w-[1400px] mx-auto space-y-10">
       <header className="space-y-4">
-        <div className="flex items-center gap-4">
-          <div className="px-4 py-1.5 bg-primary/20 text-primary rounded-full text-[10px] font-black uppercase tracking-widest">
-            System Overview
-          </div>
-          <div className="h-px flex-1 bg-white/10" />
-          <div className={`flex items-center gap-2 text-[10px] font-black uppercase tracking-widest ${statusColor}`}>
-            <div className={`w-1.5 h-1.5 rounded-full ${adbStatus === "Online" ? "bg-emerald-400 animate-pulse" : "bg-slate-500"}`} />
-            {adbStatus}
-          </div>
-        </div>
-        <h1 className="text-6xl font-black italic uppercase tracking-tighter">
-          Nexus <span className="text-primary not-italic">Dashboard</span>
+        <h1 className="text-3xl font-bold tracking-tight">
+          System <span className="text-primary">Status</span>
         </h1>
-        <p className="text-slate-500 font-medium max-w-2xl">
-          Real-time Hammerhead Karoo pulse and system status. Connect via USB to enable the Neural Link.
+        <p className="text-slate-500 font-medium max-w-2xl text-sm leading-relaxed">
+          Real-time telemetry and bridge system. Verify your Hammerhead Karoo connection and monitor the neural link for secure data management.
         </p>
       </header>
 
-      {/* STATUS GRID */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <StatCard
-          label="Connection Status"
-          value={adbStatus}
-          icon={Smartphone}
-          accent={adbStatus === "Online"}
-          pulse={adbStatus === "Online"}
-          onClick={() => logInteraction("Checking Connection Pulse")}
-        />
+      {/* STATS GRID */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard 
-          label="Active Firmware" 
-          value={deviceInfo || "Unidentified"} 
-          icon={ShieldCheck} 
+          label="Connection Status" 
+          value={adbStatus === "Online" ? "ONLINE" : "OFFLINE"} 
+          icon={Smartphone} 
           accent 
-          onClick={() => logInteraction("Inspecting Firmware Integrity")}
+          pulse={adbStatus === "Online"}
         />
         <StatCard 
-          label="System Integrity" 
-          value={isCompliant ? "Gold Standard" : (adbStatus === "Online" ? "Neural Drift" : "Inactive")} 
+          label="Hardware Target" 
+          value={deviceInfo ? "HH-KAROO-X" : "NO TARGET"} 
+          icon={Cpu} 
+          disabled={isOffline}
+        />
+        <StatCard 
+          label="Security Link" 
+          value={adbStatus === "Online" ? "ENCRYPTED" : "SEVERED"} 
+          icon={ShieldCheck} 
+          disabled={isOffline}
+        />
+        <StatCard 
+          label="Firmware Compliance" 
+          value={deviceInfo === TARGET_FIRMWARE ? "VERIFIED" : (deviceInfo ? "DRIFT" : "N/A")} 
           icon={HardDrive} 
-          accent={isCompliant}
-          onClick={() => logInteraction("Verifying System Integrity")}
+          disabled={isOffline}
         />
       </div>
 
-      <div className="flex flex-col xl:flex-row gap-12">
-        {/* NEURAL PULSE MONITOR */}
-        <div className="flex-1 glass-card rounded-[3rem] overflow-hidden border border-primary/20">
-          <div className="p-8 bg-primary/10 border-b border-primary/20 flex items-center justify-between">
-            <span className="text-xs font-black uppercase tracking-widest italic flex items-center gap-3">
-              <div className="w-2 h-2 rounded-full bg-primary animate-ping" />
-              Neural Pulse Monitor
-            </span>
-            <div className="flex items-center gap-3">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+        {/* QUICK ACTIONS */}
+        <div className="xl:col-span-2 space-y-6">
+           <h2 className="text-xl font-bold tracking-tight">System Tools</h2>
+           <div className="grid grid-cols-1 gap-2">
+              {QUICK_LINKS.map((link) => (
+                <Link key={link.href} href={link.href} onClick={() => logInteraction(`Navigating to ${link.label}`)}>
+                  <div className={`glass-card p-4 rounded-lg group transition-all flex items-center gap-6 relative overflow-hidden ${isOffline ? 'opacity-30 grayscale cursor-not-allowed pointer-events-none' : 'hover:bg-white/10 border-border cursor-pointer active:scale-[0.99]'}`}>
+                    <div className={`p-4 rounded-md transition-all ${isOffline ? 'bg-slate-500/10 text-slate-500' : 'bg-primary/5 text-primary group-hover:bg-primary group-hover:text-white'}`}>
+                      <link.icon className="w-6 h-6" />
+                    </div>
+                    <div className="flex-1">
+                       <div className="flex items-center gap-4">
+                         <h3 className="text-base font-bold tracking-tight">{link.label}</h3>
+                         {isOffline && (
+                           <span className="text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 bg-red-500/10 text-red-500 rounded-md border border-red-500/10">Offline</span>
+                         )}
+                       </div>
+                       <p className="text-xs text-slate-500 font-medium">{link.desc}</p>
+                    </div>
+                    <ArrowRight className={`w-5 h-5 transition-all ${isOffline ? 'text-slate-300' : 'text-slate-400 group-hover:text-primary group-hover:translate-x-1'}`} />
+                  </div>
+                </Link>
+              ))}
+           </div>
+        </div>
+
+        {/* SYSTEM LOG */}
+        <div className="space-y-6">
+           <div className="flex items-center justify-between">
+              <h2 className="text-xl font-bold tracking-tight">System Log</h2>
               <button 
-                onClick={clearLogs}
-                className="text-[8px] font-black px-3 py-1.5 bg-white/5 border border-white/10 rounded-full uppercase tracking-widest text-slate-500 hover:bg-white/10 hover:text-white transition-all"
+                onClick={() => { clearLogs(); logInteraction("Logs Cleared"); }}
+                className="px-3 py-1 bg-secondary border border-border rounded-md text-[10px] font-bold tracking-tight text-slate-500 hover:text-primary transition-all"
               >
                 Clear
               </button>
-              <div className="text-[8px] font-black px-3 py-1.5 bg-primary/20 rounded-full uppercase tracking-widest text-primary">Live</div>
-            </div>
-          </div>
-          <div className="p-10 space-y-5 font-mono min-h-[400px] max-h-[500px] overflow-y-auto custom-scrollbar">
-            {logs.map((log, i) => (
-              <motion.div
-                key={`${log}-${i}`}
-                initial={{ x: -20, opacity: 0 }}
-                animate={{ x: 0, opacity: 1 }}
-                className={`text-[10px] uppercase font-bold break-all ${
-                  log.includes("EXEC ::") ? "text-emerald-500/80" 
-                  : log.includes("USER ::") ? "text-amber-400/80"
-                  : log.includes("SYSTEM ::") ? "text-blue-400"
-                  : i === 0 ? "text-primary" 
-                  : "text-slate-500"
-                }`}
-              >
-                <span className="opacity-40 mr-2">{log.split("] ")[0]}]</span>
-                {log.split("] ").slice(1).join("] ")}
-              </motion.div>
-            ))}
-          </div>
-          <div className="p-8 bg-black/20 border-t border-white/5 flex items-center gap-4">
-            <Cpu className="w-4 h-4 text-slate-600" />
-            <p className="text-[9px] font-black uppercase tracking-widest opacity-30 italic">Target: HH-K2-SRAM Neural Core :: 1.352.1409.3</p>
-          </div>
-        </div>
-
-        {/* QUICK LAUNCH */}
-        <div className="w-full xl:w-[380px] space-y-6">
-          <h2 className="text-xl font-black italic uppercase tracking-tight">Quick <span className="text-primary not-italic">Launch</span></h2>
-          {QUICK_LINKS.map(({ href, icon: Icon, label, desc }) => (
-            <Link key={href} href={href} onClick={() => logInteraction(`Navigating to ${label}`)}>
-              <motion.div
-                whileHover={{ x: 6, scale: 1.01 }}
-                className="glass-card p-8 rounded-3xl flex items-center gap-6 group hover:border-primary/40 transition-all cursor-pointer"
-              >
-                <div className="p-4 bg-primary/10 text-primary rounded-2xl group-hover:bg-primary group-hover:text-white transition-all shrink-0">
-                  <Icon className="w-6 h-6" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-black italic uppercase tracking-tight text-base">{label}</p>
-                  <p className="text-[10px] text-slate-500 font-medium mt-0.5 truncate">{desc}</p>
-                </div>
-                <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors shrink-0" />
-              </motion.div>
-            </Link>
-          ))}
-
-          {/* DEVICE CARD */}
-          <div 
-            onClick={() => logInteraction("Opening Hardware Details")}
-            className={`glass-card p-8 rounded-3xl space-y-4 transition-all cursor-pointer ${adbStatus === "Online" ? (isCompliant ? "border-emerald-500/50" : "border-amber-500/30") : ""}`}
-          >
-            <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Target Hardware</p>
-            <div className="flex items-center gap-4">
-              <div className={`p-4 rounded-2xl ${adbStatus === "Online" ? (isCompliant ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-400") : "bg-white/5 text-slate-600"}`}>
-                <Smartphone className="w-6 h-6" />
-              </div>
-              <div>
-                <p className="font-black italic uppercase text-lg tracking-tight">Hammerhead Karoo</p>
-                <p className={`text-[10px] font-black uppercase tracking-widest ${statusColor}`}>{adbStatus}</p>
-              </div>
-            </div>
-            <div className="h-px bg-white/5" />
-            <p className={`text-[9px] font-mono uppercase tracking-widest ${isCompliant ? "text-emerald-500/60" : "text-slate-600"}`}>
-              {deviceInfo ? `BUILD :: ${deviceInfo}` : "ADB channel pending..."}
-            </p>
-            {adbStatus === "Online" && !isCompliant && (
-              <p className="text-[8px] font-black uppercase text-amber-500/80 italic">! Version Drift Detected</p>
-            )}
-          </div>
+           </div>
+           <div className="glass-card h-[500px] rounded-lg p-6 font-mono text-[12px] overflow-y-auto space-y-2 custom-scrollbar bg-white/5 dark:bg-black/20 border-border">
+              {logs.map((log, i) => (
+                <motion.div 
+                  initial={{ opacity: 0, x: -5 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  key={i} 
+                  className={`border-l-2 pl-4 py-0.5 transition-colors ${
+                    log.includes("Warning") ? "border-red-500/50 text-red-400" : 
+                    log.includes("Success") || log.includes("Verified") ? "border-emerald-500/50 text-emerald-400" :
+                    log.includes("USER ::") ? "border-primary/50 text-primary-foreground/70" :
+                    "border-border text-slate-400"
+                  }`}
+                >
+                  <span className="opacity-30 mr-2 text-[10px]">{log.includes("] ") ? log.split("] ")[0] + "]" : ""}</span>
+                  <span className="font-medium tracking-tight text-foreground/80">{log.includes("] ") ? log.split("] ").slice(1).join("] ") : log}</span>
+                </motion.div>
+              ))}
+           </div>
         </div>
       </div>
     </div>

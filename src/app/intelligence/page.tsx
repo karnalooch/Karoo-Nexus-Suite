@@ -39,12 +39,12 @@ export default function IntelligenceBureau() {
         <div className="flex items-center gap-4">
            <div className="px-4 py-1.5 bg-primary/20 text-primary rounded-full text-[10px] font-black uppercase tracking-widest flex items-center gap-2 border border-primary/20">
               <Shield className="w-3 h-3" />
-              Intelligence Bureau
+              System Information
            </div>
            <div className="h-px flex-1 bg-white/10" />
         </div>
         <h1 className="text-7xl font-black italic uppercase tracking-tighter leading-none">
-          Nexus <span className="text-primary not-italic">Intelligence</span>
+          About <span className="text-primary not-italic">Karoo Nexus</span>
         </h1>
         <p className="text-slate-500 font-medium max-w-3xl text-lg leading-relaxed">
           The legal and philosophical framework of the Karoo Nexus ecosystem. Here we document our vision, our commercial rights, and the open-source foundations that power our mission.
@@ -74,7 +74,7 @@ export default function IntelligenceBureau() {
       <div className="space-y-12">
         <div className="flex items-center justify-between">
            <h2 className="text-3xl font-black italic uppercase tracking-tight flex items-center gap-4">
-             Neural <span className="text-primary not-italic">Attribution</span>
+             Third-Party <span className="text-primary not-italic">Licenses</span>
              <Award className="w-6 h-6 text-slate-700" />
            </h2>
            <span className="text-[10px] font-black uppercase tracking-widest bg-white/5 px-6 py-3 rounded-full border border-white/10 text-slate-400">
@@ -116,7 +116,7 @@ export default function IntelligenceBureau() {
                   The Karoo Nexus Suite operates under a legitimate legal shell. All third-party dependencies are respected, and commercial operations are fully authorized within the parameters of this intelligence.
                </p>
             </div>
-            <p className="text-[10px] font-black uppercase tracking-[0.3em] text-primary/50">End of Directive V12</p>
+            <p className="text-[10px] font-black uppercase tracking-[0.3em] text-primary/50">Version 0.1.0 Stable</p>
          </div>
       </footer>
     </div>
