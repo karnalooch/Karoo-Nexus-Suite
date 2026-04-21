@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  output: "export",
   transpilePackages: [
     "@tauri-apps/api",
     "@tauri-apps/plugin-shell",

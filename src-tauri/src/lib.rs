@@ -247,6 +247,28 @@ async fn pull_file(app: tauri::AppHandle, remote_path: String, local_path: Strin
 }
 
 #[tauri::command]
+async fn launch_intent(app: tauri::AppHandle, component: String) -> Result<String, String> {
+    log_interaction(app.clone(), format!("Launching Android Component: {}", component)).await;
+    let args = ["shell", "am", "start", "-n", &component];
+    log_adb(&app, &args);
+
+    let output = app.shell()
+        .command(&adb_path())
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        log_to_nexus(&app, format!("SYSTEM :: Intent Launch Failed :: {}", err));
+        Err(err)
+    }
+}
+
+#[tauri::command]
 async fn capture_ota_logcat(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     log_interaction(app.clone(), "Scanning logcat for OTA update links".to_string()).await;
     
@@ -280,6 +302,84 @@ async fn capture_ota_logcat(app: tauri::AppHandle) -> Result<Vec<String>, String
     Ok(links)
 }
 
+#[tauri::command]
+async fn inject_custom_map(app: tauri::AppHandle, local_path: String) -> Result<String, String> {
+    log_interaction(app.clone(), format!("Injecting map package from {}", local_path)).await;
+    
+    let remote_path = "/sdcard/Download/custom_map_payload.zip";
+    let args_push = ["push", &local_path, remote_path];
+    log_adb(&app, &args_push);
+    let output_push = app.shell().command(&adb_path()).args(args_push).output().await.map_err(|e| e.to_string())?;
+    
+    if !output_push.status.success() {
+        return Err(format!("Failed to push map file: {}", String::from_utf8_lossy(&output_push.stderr)));
+    }
+
+    let sql_command = format!(
+        "sqlite3 /data/data/io.hammerhead.offlineregionservice/databases/file_request_table \"INSERT INTO file_request_table (url, path) VALUES ('custom_inject', '{}');\"",
+        remote_path
+    );
+    
+    let args_sql = ["shell", "su", "-c", &sql_command];
+    log_adb(&app, &args_sql);
+    let output_sql = app.shell().command(&adb_path()).args(args_sql).output().await.map_err(|e| e.to_string())?;
+
+    if output_sql.status.success() {
+        Ok("Map successfully injected into file_request_table".to_string())
+    } else {
+        Err(format!("SQLite injection failed (Root required): {}", String::from_utf8_lossy(&output_sql.stderr)))
+    }
+}
+
+#[tauri::command]
+async fn sideload_custom_ota(app: tauri::AppHandle, local_path: String) -> Result<String, String> {
+    log_interaction(app.clone(), format!("Sideloading OTA update from {}", local_path)).await;
+    
+    let remote_path = "/sdcard/update.zip";
+    let args_push = ["push", &local_path, remote_path];
+    log_adb(&app, &args_push);
+    
+    let output_push = app.shell().command(&adb_path()).args(args_push).output().await.map_err(|e| e.to_string())?;
+    if !output_push.status.success() {
+        return Err(format!("Failed to push OTA zip: {}", String::from_utf8_lossy(&output_push.stderr)));
+    }
+
+    let sql_command = format!("am broadcast -a com.mediatek.systemupdate.start_ota_update --es path {}", remote_path);
+    let args_intent = ["shell", "su", "-c", &sql_command];
+    
+    log_adb(&app, &args_intent);
+    let output_intent = app.shell().command(&adb_path()).args(args_intent).output().await.map_err(|e| e.to_string())?;
+
+    if output_intent.status.success() {
+        Ok("OTA package pushed and update broadcast sent. Check device screen.".to_string())
+    } else {
+        Err(format!("Failed to trigger OTA broadcast: {}", String::from_utf8_lossy(&output_intent.stderr)))
+    }
+}
+
+#[tauri::command]
+async fn disarm_root_detection(app: tauri::AppHandle) -> Result<String, String> {
+    log_interaction(app.clone(), "Disarming Bugsnag root detection".to_string()).await;
+    
+    let disable_telemetry = ["shell", "su", "-c", "pm disable io.hammerhead.telemetry"];
+    log_adb(&app, &disable_telemetry);
+    let _ = app.shell().command(&adb_path()).args(disable_telemetry).output().await.map_err(|e| e.to_string())?;
+
+    let rename_lib = ["shell", "su", "-c", "mv /system/lib/libbugsnag-root-detection.so /system/lib/libbugsnag-root-detection.so.bak || true"];
+    log_adb(&app, &rename_lib);
+    let rename_lib64 = ["shell", "su", "-c", "mv /system/lib64/libbugsnag-root-detection.so /system/lib64/libbugsnag-root-detection.so.bak || true"];
+    log_adb(&app, &rename_lib64);
+    
+    let output_lib = app.shell().command(&adb_path()).args(rename_lib).output().await.map_err(|e| e.to_string())?;
+    let _ = app.shell().command(&adb_path()).args(rename_lib64).output().await.map_err(|e| e.to_string())?;
+
+    if output_lib.status.success() {
+        Ok("Bugsnag detection neutralized successfully. Telemetry disabled.".to_string())
+    } else {
+        Err(format!("Failed to patch Bugsnag. Is root access granted? Error: {}", String::from_utf8_lossy(&output_lib.stderr)))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -293,10 +393,14 @@ pub fn run() {
             log_interaction,
             list_packages,
             pull_file,
+            launch_intent,
             capture_ota_logcat,
             fetch_ota_metadata,
             get_github_release_apk,
             download_firmware,
+            inject_custom_map,
+            sideload_custom_ota,
+            disarm_root_detection,
             activity::sync_activities,
             activity::analyze_fit_file
         ])

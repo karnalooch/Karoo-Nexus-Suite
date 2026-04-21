@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Search, Download, Zap, Terminal, ShieldAlert, Cpu, HardDriveDownload, Network } from "lucide-react";
+import { Search, Download, Zap, Terminal, ShieldAlert, Cpu, HardDriveDownload, Network, ShieldCheck, Map, Settings, Unlock } from "lucide-react";
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -14,8 +14,12 @@ interface AppInfo {
   name: string;
   path: string;
   isSystem: boolean;
-  status: 'idle' | 'pulling' | 'success' | 'error';
+  status: 'idle' | 'pulling' | 'success' | 'error' | 'unavailable';
 }
+
+const sanitizeFilename = (name: string): string => {
+  return name.replace(/[<>:"/\\|?*]/g, "_").trim();
+};
 
 const prettifyPackageName = (id: string): string => {
   if (!id || id === "unknown.package" || id === "unknown") return "Service Package";
@@ -189,22 +193,25 @@ export default function InvestigationPage() {
     logInteraction("INVESTIGATION :: Scanning device for installed packages");
     try {
       const list = await invoke("list_packages") as string[];
-      const parsed: AppInfo[] = list.map(pkgLine => {
-        // Robust splitting of package:/path/to.apk=com.id
-        const lastEq = pkgLine.lastIndexOf("=");
-        if (lastEq === -1) {
-           const id = pkgLine.replace("package:", "");
-           return { id, name: prettifyPackageName(id), path: "", isSystem: true, status: 'idle' };
-        }
-        
-        const path = pkgLine.substring(0, lastEq).replace("package:", "");
-        const id = pkgLine.substring(lastEq + 1) || "unknown.package";
-        
-        const name = prettifyPackageName(id);
-        const isSystem = !path.includes("/data/app/");
+      const parsed: AppInfo[] = list
+        .filter(line => line.includes("package:")) // Discard non-package lines (header/warnings)
+        .map(pkgLine => {
+          // Robust splitting of package:/path/to.apk=com.id
+          const lastEq = pkgLine.lastIndexOf("=");
+          
+          if (lastEq === -1) {
+             const id = pkgLine.replace("package:", "");
+             return { id, name: prettifyPackageName(id), path: "", isSystem: true, status: 'unavailable' };
+          }
+          
+          const path = pkgLine.substring(0, lastEq).replace("package:", "");
+          const id = pkgLine.substring(lastEq + 1) || "unknown.package";
+          
+          const name = prettifyPackageName(id);
+          const isSystem = !path.includes("/data/app/");
 
-        return { id, name, path, isSystem, status: 'idle' };
-      });
+          return { id, name, path, isSystem, status: 'idle' };
+        });
       setPackages(parsed);
       logInteraction(`INVESTIGATION :: Found ${parsed.length} packages (${parsed.filter(p => !p.isSystem).length} user apps)`);
     } catch (e) {
@@ -234,11 +241,22 @@ export default function InvestigationPage() {
     const targets = packages.filter(p => selectedIds.has(p.id));
     
     for (const target of targets) {
+      if (!target.path) {
+        setPackages(prev => prev.map(p => p.id === target.id ? { ...p, status: 'unavailable' } : p));
+        logInteraction(`INVESTIGATION :: SKIPPING :: ${target.id} :: No physical path found`);
+        continue;
+      }
+
       // Update local state to 'pulling'
       setPackages(prev => prev.map(p => p.id === target.id ? { ...p, status: 'pulling' } : p));
       
-      const fileName = `${target.name}_${target.id}.apk`;
-      const localPath = `${dir}/${fileName}`;
+      const safeName = sanitizeFilename(target.name);
+      const safeId = sanitizeFilename(target.id);
+      const fileName = `${safeName}_${safeId}.apk`;
+      
+      // Clean target directory path and combine
+      const cleanDir = dir.replace(/\\/g, '/').replace(/\/$/, '');
+      const localPath = `${cleanDir}/${fileName}`;
       
       try {
         logInteraction(`INVESTIGATION :: Pulling ${target.id} -> ${fileName}`);
@@ -251,6 +269,15 @@ export default function InvestigationPage() {
     }
     
     logInteraction("INVESTIGATION :: Batch Extraction Complete");
+  };
+
+  const launchAndroidComponent = async (component: string, name: string) => {
+    try {
+      await invoke("launch_intent", { component });
+      logInteraction(`INVESTIGATION :: SUCCESS :: Launched ${name}`);
+    } catch (e) {
+      logInteraction(`INVESTIGATION :: FAILED :: Could not launch ${name}. Ensure screen is unlocked.`);
+    }
   };
 
   const toggleSelect = (id: string) => {
@@ -300,6 +327,52 @@ export default function InvestigationPage() {
     const testUrl = `https://api.hammerhead.io/v1/device/update?deviceid=${deviceId}&version=${version}&clientVersion=v2`;
     logInteraction(`INVESTIGATION :: SIMULATION :: Injecting v2 Tactical Query [ID: ${deviceId}]`);
     setCapturedLinks(prev => Array.from(new Set([testUrl, ...prev])));
+  };
+
+  const injectCustomMap = async () => {
+    if (isOffline) return;
+    try {
+      const file = await open({
+        multiple: false,
+        title: "Select Custom Map Package (.zip / .sqlite / .map)",
+        filters: [{ name: "Map Data", extensions: ["zip", "sqlite", "map", "mbtiles"] }]
+      });
+      if (!file) return;
+      logInteraction(`INVESTIGATION :: Selected Map Package: ${file}`);
+      const res = await invoke("inject_custom_map", { localPath: file });
+      logInteraction(`INVESTIGATION :: Map Injection Result: ${res}`);
+    } catch (e) {
+      logInteraction(`INVESTIGATION :: Map Injection Failed :: ${e}`);
+    }
+  };
+
+  const sideloadCustomOta = async () => {
+    if (isOffline) return;
+    try {
+      const file = await open({
+        multiple: false,
+        title: "Select OTA Update Package (.zip)",
+        filters: [{ name: "OTA Zip", extensions: ["zip"] }]
+      });
+      if (!file) return;
+      logInteraction(`INVESTIGATION :: Selected OTA Package: ${file}`);
+      logInteraction(`INVESTIGATION :: Pushing and sideloading OTA... This may take several minutes.`);
+      const res = await invoke("sideload_custom_ota", { localPath: file });
+      logInteraction(`INVESTIGATION :: OTA Sideload Result: ${res}`);
+    } catch (e) {
+      logInteraction(`INVESTIGATION :: OTA Sideload Failed :: ${e}`);
+    }
+  };
+
+  const disarmRootDetection = async () => {
+    if (isOffline) return;
+    try {
+      logInteraction(`INVESTIGATION :: Attempting to disarm Bugsnag Root Detection & Telemetry...`);
+      const res = await invoke("disarm_root_detection");
+      logInteraction(`INVESTIGATION :: Disarm Result: ${res}`);
+    } catch (e) {
+      logInteraction(`INVESTIGATION :: Disarm Failed :: ${e}`);
+    }
   };
 
   const filteredPackages = packages.filter(p => {
@@ -444,10 +517,12 @@ export default function InvestigationPage() {
                            <div className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase flex items-center gap-1.5 ${
                              pkg.status === 'pulling' ? 'text-amber-500 animate-pulse' :
                              pkg.status === 'success' ? 'text-emerald-500' :
+                             pkg.status === 'unavailable' ? 'text-slate-400' :
                              'text-red-500'
                            }`}>
                               {pkg.status === 'pulling' ? <Zap className="w-2.5 h-2.5 animate-spin" /> : 
-                               pkg.status === 'success' ? <ShieldAlert className="w-2.5 h-2.5" /> :
+                               pkg.status === 'success' ? <ShieldCheck className="w-2.5 h-2.5" /> :
+                               pkg.status === 'unavailable' ? <ShieldAlert className="w-2.5 h-2.5" /> :
                                <ShieldAlert className="w-2.5 h-2.5" />}
                               {pkg.status}
                            </div>
@@ -455,7 +530,7 @@ export default function InvestigationPage() {
                         <div className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${
                           isSelected ? 'bg-primary border-primary text-white' : 'border-border text-transparent'
                         }`}>
-                           <ShieldAlert className="w-2.5 h-2.5" />
+                           <ShieldCheck className="w-2.5 h-2.5" />
                         </div>
                       </div>
                     </motion.div>
@@ -562,22 +637,105 @@ export default function InvestigationPage() {
             url={activeDownloadUrl || ""}
           />
 
-          {/* ANALYSIS STATUS */}
-          <div className="bg-background/40 backdrop-blur-3xl p-8 rounded-lg border border-border shadow-md space-y-6">
-             <h3 className="text-lg font-bold tracking-tight">Analysis Status</h3>
-             <div className="space-y-4">
-                <div className="flex justify-between items-center bg-secondary/50 p-2 rounded">
-                   <span className="text-[11px] font-bold text-slate-500 uppercase tracking-widest">Root access</span>
-                   <span className="text-[11px] font-bold text-red-500 uppercase tracking-widest">Denied (Production)</span>
+          {/* ENGINEERING CORE */}
+          <div className="bg-background/40 backdrop-blur-3xl p-6 rounded-lg border border-border shadow-md space-y-6">
+             <div className="flex items-center gap-3 border-b border-border pb-4">
+                <div className="p-2 bg-primary/10 rounded-md text-primary">
+                   <Settings className="w-4 h-4" />
                 </div>
-                <div className="flex justify-between items-center bg-secondary/50 p-2 rounded">
-                   <span className="text-[11px] font-bold text-slate-500 uppercase tracking-widest">Data channel</span>
-                   <span className="text-[11px] font-bold text-emerald-500 uppercase tracking-widest">High Bandwidth</span>
-                </div>
-                <div className="flex justify-between items-center bg-secondary/50 p-2 rounded">
-                   <span className="text-[11px] font-bold text-slate-500 uppercase tracking-widest">OTA sensitivity</span>
-                   <span className="text-[11px] font-bold text-primary uppercase tracking-widest">Verified</span>
-                </div>
+                <span className="text-sm font-bold tracking-tight">Engineering Core</span>
+             </div>
+             
+             <div className="space-y-3">
+                <button 
+                  onClick={() => launchAndroidComponent("com.android.settings/.DevelopmentSettings", "Developer Options")}
+                  disabled={isOffline}
+                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                   <div className="flex items-center gap-3 text-left">
+                      <Unlock className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
+                      <div>
+                         <p className="text-xs font-bold text-foreground">Bootloader / OEM Unlock</p>
+                         <p className="text-[10px] text-slate-500 font-medium">Launch Android Developer Settings</p>
+                      </div>
+                   </div>
+                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
+                </button>
+
+                <button 
+                  onClick={() => launchAndroidComponent("com.mediatek.engineermode/.EngineerMode", "Engineer Mode")}
+                  disabled={isOffline}
+                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                   <div className="flex items-center gap-3 text-left">
+                      <Terminal className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
+                      <div>
+                         <p className="text-xs font-bold text-foreground">Root Privilege Escalation</p>
+                         <p className="text-[10px] text-slate-500 font-medium">Launch Mediatek user2root Menu</p>
+                      </div>
+                   </div>
+                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
+                </button>
+
+                <button 
+                  onClick={() => launchAndroidComponent("com.mediatek.systemupdate/.Main", "System Update Core")}
+                  disabled={isOffline}
+                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                   <div className="flex items-center gap-3 text-left">
+                      <Network className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
+                      <div>
+                         <p className="text-xs font-bold text-foreground">Force OTA Synchronization</p>
+                         <p className="text-[10px] text-slate-500 font-medium">Bypass phased rollouts via MTK Update Core</p>
+                      </div>
+                   </div>
+                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
+                </button>
+
+                <button 
+                  onClick={injectCustomMap}
+                  disabled={isOffline}
+                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                   <div className="flex items-center gap-3 text-left">
+                      <Map className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
+                      <div>
+                         <p className="text-xs font-bold text-foreground">Custom Map Injector</p>
+                         <p className="text-[10px] text-slate-500 font-medium">SQLite file_request_table patcher (Root Required)</p>
+                      </div>
+                   </div>
+                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
+                </button>
+
+                <button 
+                  onClick={sideloadCustomOta}
+                  disabled={isOffline}
+                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                   <div className="flex items-center gap-3 text-left">
+                      <HardDriveDownload className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
+                      <div>
+                         <p className="text-xs font-bold text-foreground">Sideload Custom OTA</p>
+                         <p className="text-[10px] text-slate-500 font-medium">Push and install local .zip via Broadcaster Intent</p>
+                      </div>
+                   </div>
+                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
+                </button>
+
+                <button 
+                  onClick={disarmRootDetection}
+                  disabled={isOffline}
+                  className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                   <div className="flex items-center gap-3 text-left">
+                      <ShieldCheck className="w-4 h-4 text-slate-500 group-hover:text-primary transition-colors" />
+                      <div>
+                         <p className="text-xs font-bold text-foreground">Disarm Root Detection</p>
+                         <p className="text-[10px] text-slate-500 font-medium">Disable Bugsnag telemetry & hide SU binary presence</p>
+                      </div>
+                   </div>
+                   <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-primary opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0" />
+                </button>
              </div>
           </div>
 
