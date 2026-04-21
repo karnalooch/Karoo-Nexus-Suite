@@ -40,8 +40,26 @@ export default function Dashboard() {
   const [deviceInfo, setDeviceInfo] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>(["Neural Core Initialized...", "Awaiting Device Pulse..."]);
 
-  const addLog = (msg: string) => setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev].slice(0, 15));
+  const addLog = (msg: string) => {
+    setLogs(prev => {
+      if (prev.length > 0) {
+        const last = prev[0];
+        // Clean the last message from its (xN) suffix to compare correctly
+        const lastMsgClean = last.split("] ").slice(1).join("] ").replace(/\s\(x\d+\)$/, "");
+        
+        if (lastMsgClean === msg) {
+          // Extract existing count or start at 1
+          const match = last.match(/\(x(\d+)\)$/);
+          const count = match ? parseInt(match[1]) + 1 : 2;
+          const newEntry = `[${new Date().toLocaleTimeString()}] ${msg} (x${count})`;
+          return [newEntry, ...prev.slice(1)];
+        }
+      }
+      return [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev].slice(0, 30);
+    });
+  };
   
+  const clearLogs = () => setLogs(["Neural Core Reset...", "Awaiting Device Pulse..."]);
   const logInteraction = (action: string) => addLog(`USER :: ${action}`);
 
   // Detect if running inside Tauri desktop app
@@ -163,7 +181,15 @@ export default function Dashboard() {
               <div className="w-2 h-2 rounded-full bg-primary animate-ping" />
               Neural Pulse Monitor
             </span>
-            <div className="text-[8px] font-black px-3 py-1.5 bg-primary/20 rounded-full uppercase tracking-widest text-primary">Live</div>
+            <div className="flex items-center gap-3">
+              <button 
+                onClick={clearLogs}
+                className="text-[8px] font-black px-3 py-1.5 bg-white/5 border border-white/10 rounded-full uppercase tracking-widest text-slate-500 hover:bg-white/10 hover:text-white transition-all"
+              >
+                Clear
+              </button>
+              <div className="text-[8px] font-black px-3 py-1.5 bg-primary/20 rounded-full uppercase tracking-widest text-primary">Live</div>
+            </div>
           </div>
           <div className="p-10 space-y-5 font-mono min-h-[400px] max-h-[500px] overflow-y-auto custom-scrollbar">
             {logs.map((log, i) => (

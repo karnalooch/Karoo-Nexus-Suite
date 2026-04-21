@@ -351,7 +351,7 @@ export default function InvestigationPage() {
             isOpen={downloaderOpen}
             onClose={() => setDownloaderOpen(false)}
             fileName={activeFileName}
-            url={activeDownloadUrl}
+            url={activeDownloadUrl || ""}
           />
 
           {/* SYSTEM INFO STACK */}

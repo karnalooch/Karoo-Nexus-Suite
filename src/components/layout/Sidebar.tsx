@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { LayoutDashboard, Smartphone, Activity, Settings, Zap, Terminal } from "lucide-react";
+import { LayoutDashboard, Smartphone, Activity, Settings, Zap, Terminal, Shield } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AtmosphereToggle } from "../ui/AtmosphereToggle";
@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { href: "/", icon: LayoutDashboard, label: "Dashboard" },
   { href: "/software", icon: Zap, label: "Software Hub" },
   { href: "/activities", icon: Activity, label: "Activity Pulse" },
+  { href: "/intelligence", icon: Shield, label: "Nexus Intelligence" },
 ];
 
 export function Sidebar() {

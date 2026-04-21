@@ -1,0 +1,56 @@
+[
+  {
+    "id": "ki2",
+    "name": "Ki2",
+    "owner": "valterc",
+    "repo": "ki2",
+    "description": "Shimano Di2 electronic shifting integration for Karoo. View battery status, gear ratios, and shift history.",
+    "category": "Groupsets",
+    "featured": true
+  },
+  {
+    "id": "karoo-reminder",
+    "name": "Karoo Reminder",
+    "owner": "timklge",
+    "repo": "karoo-reminder",
+    "description": "Advanced hydration and nutrition alerts based on time, distance, or even sensor data.",
+    "category": "Nutrition",
+    "featured": true
+  },
+  {
+    "id": "headwind",
+    "name": "Headwind",
+    "owner": "timklge",
+    "repo": "karoo-headwind",
+    "description": "Real-time wind speed and direction data field with hourly weather forecasts.",
+    "category": "Data Field",
+    "featured": true
+  },
+  {
+    "id": "velovigil",
+    "name": "VeloVigil",
+    "owner": "velovigil",
+    "repo": "velovigil-karoo",
+    "description": "HRV computation (RMSSD/SDNN), crash detection, and Fleet dashboard for multi-rider monitoring.",
+    "category": "Health & Safety",
+    "featured": false
+  },
+  {
+    "id": "gps-control",
+    "name": "GPS Control",
+    "owner": "timklge",
+    "repo": "karoo-gps-control",
+    "description": "Toggle between High Accuracy and Battery Saving GPS modes directly from the ride drawer.",
+    "category": "System",
+    "featured": false
+  },
+  {
+    "id": "kremote",
+    "name": "K-Remote",
+    "owner": "lockevod",
+    "repo": "Karoo-KRemote",
+    "description": "Control your Karoo using ANT+ remotes or shifting buttons. Swipe screens and zoom maps easily.",
+    "category": "Utility",
+    "featured": false
+  }
+]

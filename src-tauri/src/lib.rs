@@ -69,6 +69,34 @@ async fn fetch_ota_metadata(url: String) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
+async fn get_github_release_apk(owner: String, repo: String) -> Result<String, String> {
+    let url = format!("https://api.github.com/repos/{}/{}/releases/latest", owner, repo);
+    let client = reqwest::Client::new();
+    let response = client.get(url)
+        .header("User-Agent", "Karoo-Nexus-Hub")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format!("GitHub API error: {}", response.status()));
+    }
+
+    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    
+    let assets = json["assets"].as_array().ok_or("No assets found in latest release")?;
+    
+    for asset in assets {
+        let name = asset["name"].as_str().unwrap_or("");
+        if name.ends_with(".apk") {
+            return Ok(asset["browser_download_url"].as_str().unwrap_or("").to_string());
+        }
+    }
+
+    Err("No APK found in the latest release assets".to_string())
+}
+
+#[tauri::command]
 async fn download_firmware(app: tauri::AppHandle, url: String, local_path: String) -> Result<String, String> {
     log_interaction(app.clone(), format!("Initiating Tactical Download from {}", url)).await;
     log_to_nexus(&app, format!("DEBUG :: Requesting URL: {}", url));
@@ -100,6 +128,12 @@ async fn download_firmware(app: tauri::AppHandle, url: String, local_path: Strin
     }
 
     let total_size = response.content_length().unwrap_or(0);
+    
+    // Ensure parent directory exists
+    if let Some(parent) = std::path::Path::new(&local_path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
     let mut file = std::fs::File::create(&local_path).map_err(|e| e.to_string())?;
     let mut downloaded: u64 = 0;
     let mut stream = response.bytes_stream();
@@ -126,7 +160,7 @@ async fn download_firmware(app: tauri::AppHandle, url: String, local_path: Strin
 #[tauri::command]
 async fn check_adb_connection(app: tauri::AppHandle) -> Result<String, String> {
     let args = ["devices"];
-    log_adb(&app, &args);
+    // Background polling is silent to avoid monitor clutter
     
     let output = app.shell()
         .command(&adb_path())
@@ -261,6 +295,7 @@ pub fn run() {
             pull_file,
             capture_ota_logcat,
             fetch_ota_metadata,
+            get_github_release_apk,
             download_firmware,
             activity::sync_activities,
             activity::analyze_fit_file
