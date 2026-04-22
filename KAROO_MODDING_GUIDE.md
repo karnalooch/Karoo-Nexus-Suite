@@ -115,3 +115,21 @@ Jeśli próbujesz modyfikować te bazy danych:
 **Karoo** to pod maską po prostu smartfon z Androidem bez ekranu dotykowego telefonu. Baza danych, którą tu hakujemy, to plik w którym zapisuje się "Zrób czarne tło, wyświetl 4 pola i nazwij to Basic Profile".
 
 Ponieważ firma Hammerhead zablokowała możliwość ręcznego podmieniania tych danych na komputerze (ukrywając je w skompresowanym formacie binarnym), stworzyliśmy narzędzie **Nexus**, które "oszukuje" system, wklejając nowe ustawienia jak chirurg — dbając o to, by system Karoo myślał, że sam dokonał tych zmian.
+
+---
+
+## 4. Oficjalne SDK (Pisanie własnych mini-aplikacji)
+
+Oprócz "twardego" modyfikowania bazy danych, Hammerhead udostępnia oficjalne narzędzia dla programistów, znane jako **Karoo Extensions (karoo-ext)**. Pozwala to na stworzenie własnej, pełnoprawnej aplikacji na Androida (APK), która integruje się z systemem Karoo.
+
+**Co daje oficjalne SDK?**
+Dzięki bibliotece `io.hammerhead:karoo-ext`, możesz napisać aplikację, która potrafi:
+1.  **Custom Data Fields (Własne Pola Danych):** Zamiast używać wbudowanego `TYPE_POWER_ID`, możesz stworzyć np. `MY_GLUCOSE_ID` albo `WEATHER_RADAR_ID`. Możesz samodzielnie narysować wygląd takiego kafelka (używając mechanizmu Android `RemoteViews`) i zadeklarować go w pliku konfiguracyjnym XML. Po zainstalowaniu, Karoo samo zauważy Twój nowy typ danych i pozwoli go przypisać do układu ekranu!
+2.  **Podgląd na żywo (Ride State):** Aplikacja może nasłuchiwać co dokładnie dzieje się na rowerze – jaka jest prędkość, dystans, moc. 
+3.  **Akcje sprzętowe (Hardware Actions):** Możesz w kodzie kazać urządzeniu pikać (Beeper), wymusić wciśnięcie przycisku, albo wysłać specjalne powiadomienie (In-ride Alert) bezpośrednio na ekran podczas jazdy.
+4.  **Skanowanie sprzętu:** Obsługa niestandardowych czujników Bluetooth/ANT+, których system domyślnie nie rozumie.
+
+**Jak to się ma do Nexusa?**
+Modowanie bazy danych (Surgery) przydaje się, by szybko, wygodnie i z poziomu komputera konfigurować to, co **już istnieje** na urządzeniu. 
+Oficjalne SDK przydaje się, gdy chcesz stworzyć **zupełnie nową funkcjonalność** – np. połączyć Karoo z zewnętrznym serwisem albo niestandardowym czujnikiem. Używając Nexusa, możesz potem błyskawicznie zainstalować swoje nowe rozszerzenie APK na urządzeniu za pomocą funkcji Sideload.
+
