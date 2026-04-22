@@ -5,6 +5,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { NexusProvider } from "@/context/NexusContext";
 import { WindowControls } from "@/components/layout/WindowControls";
+import { TerminalOverlay } from "@/components/layout/TerminalOverlay";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
@@ -45,6 +46,7 @@ export default function RootLayout({
                <div className="p-10 page-enter">
                  {children}
                </div>
+               <TerminalOverlay />
             </main>
           </div>
         </ThemeProvider>

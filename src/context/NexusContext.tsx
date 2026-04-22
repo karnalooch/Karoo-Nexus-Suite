@@ -11,6 +11,26 @@ interface NexusContextType {
   addLog: (msg: string) => void;
   clearLogs: () => void;
   isTauri: boolean;
+  profiles: any[];
+  fetchProfiles: () => Promise<void>;
+  discoveryProgress: { percentage: number; current: number; total: number } | null;
+  
+  // Designer State Persistence
+  localProfiles: any[];
+  setLocalProfiles: (p: any[]) => void;
+  pendingChanges: Set<string>;
+  handleLocalRename: (id: string, newName: string) => void;
+  applyChangesToDevice: () => Promise<void>;
+  isApplying: boolean;
+  
+  slots: (string | null)[];
+  setSlots: (s: (string | null)[]) => void;
+  profileName: string;
+  setProfileName: (n: string) => void;
+  layoutType: number;
+  setLayoutType: (t: number) => void;
+  selectedProfileId: string | null;
+  setSelectedProfileId: (id: string | null) => void;
 }
 
 const NexusContext = createContext<NexusContextType | undefined>(undefined);
@@ -21,6 +41,54 @@ export function NexusProvider({ children }: { children: ReactNode }) {
   const [adbStatus, setAdbStatus] = useState("Disconnected");
   const [deviceInfo, setDeviceInfo] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>(["Neural Core Initialized...", "Awaiting Device Pulse..."]);
+  const [profiles, setProfiles] = useState<any[]>([]);
+  const [discoveryProgress, setDiscoveryProgress] = useState<{ percentage: number; current: number; total: number } | null>(null);
+
+  // Designer Persistent State
+  const [localProfiles, setLocalProfiles] = useState<any[]>([]);
+  const [pendingChanges, setPendingChanges] = useState<Set<string>>(new Set());
+  const [isApplying, setIsApplying] = useState(false);
+  const [slots, setSlots] = useState<(string | null)[]>(Array(10).fill(null));
+  const [profileName, setProfileName] = useState("Nexus Custom Ride");
+  const [layoutType, setLayoutType] = useState<number>(6);
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (profiles.length > 0) {
+      setLocalProfiles(profiles);
+    }
+  }, [profiles]);
+
+  const handleLocalRename = (id: string, newName: string) => {
+    setLocalProfiles(prev => prev.map(p => p.id === id ? { ...p, name: newName } : p));
+    setPendingChanges(prev => new Set(prev).add(id));
+  };
+
+  const applyChangesToDevice = async () => {
+    setIsApplying(true);
+    addLog("-- INITIALIZING SURGERY BATCH --");
+    try {
+      for (const id of pendingChanges) {
+        const local = localProfiles.find(p => p.id === id);
+        const original = profiles.find(p => p.id === id);
+        if (local && original) {
+          addLog(`Patching ${original.name} -> ${local.name}...`);
+          await invoke("rename_profile_on_device", {
+            dbPath: original.db_path,
+            oldName: original.name,
+            newName: local.name
+          });
+        }
+      }
+      addLog("-- SUCCESS :: All patches applied. Syncing UI...");
+      setPendingChanges(new Set());
+      await fetchProfiles();
+    } catch (err) {
+      addLog(`-- BATCH ERROR :: ${String(err)}`);
+    } finally {
+      setIsApplying(false);
+    }
+  };
 
   // Detect if running inside Tauri desktop app
   const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
@@ -43,6 +111,24 @@ export function NexusProvider({ children }: { children: ReactNode }) {
 
   const clearLogs = () => setLogs(["Neural Core Reset...", "Awaiting Device Pulse..."]);
 
+  const isFetchingRef = React.useRef(false);
+
+  const fetchProfiles = async () => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+    try {
+      const p = await invoke("get_remote_profiles") as any[];
+      setProfiles(p);
+      addLog(`Discovery Complete: Found ${p.length} profiles.`);
+    } catch (e) {
+      addLog(`Error: Profile Discovery Failed — ${String(e)}`);
+      console.error("Failed to fetch profiles", e);
+    } finally {
+      isFetchingRef.current = false;
+      setTimeout(() => setDiscoveryProgress(null), 2000); // Keep it visible for a moment
+    }
+  };
+
   useEffect(() => {
     if (!isTauri) {
       setAdbStatus("Dev Mode");
@@ -50,50 +136,72 @@ export function NexusProvider({ children }: { children: ReactNode }) {
     }
 
     let unlisten: (() => void) | undefined;
-    async function setupListener() {
+    let unlistenProgress: (() => void) | undefined;
+    
+    async function setupListeners() {
       unlisten = await listen("nexus-log", (event) => {
         addLog(event.payload as string);
       });
+      unlistenProgress = await listen("discovery-progress", (event: any) => {
+        setDiscoveryProgress(event.payload);
+      });
     }
-    setupListener();
+    setupListeners();
+
+    let currentStatus = "Disconnected";
 
     const checkConnection = async () => {
       try {
         const devices = await invoke("check_adb_connection") as string;
-        if (devices.includes("\tdevice")) {
-          if (adbStatus !== "Online") {
+        const isOnline = devices.includes("\tdevice");
+
+        if (isOnline) {
+          if (currentStatus !== "Online") {
+            currentStatus = "Online";
             setAdbStatus("Online");
             setLogs(prev => prev.filter(l => !l.includes("Awaiting Device Pulse...")));
             addLog("Device Detected: HH-KAROO-X — Channel Open");
-            const info = await invoke("get_karoo_info") as string;
-            setDeviceInfo(info);
-            if (info === TARGET_FIRMWARE) {
-              addLog("SYSTEM :: Target 1.352.1409.3 Verified — Gold Standard Compliance");
+            
+            try {
+              const info = await invoke("get_karoo_info") as string;
+              setDeviceInfo(info);
+              if (info === TARGET_FIRMWARE) {
+                addLog("SYSTEM :: Target 1.352.1409.3 Verified — Gold Standard Compliance");
+              }
+            } catch (e) {}
+
+            if (!isFetchingRef.current) {
+              fetchProfiles();
             }
           }
         } else {
-          if (adbStatus !== "Disconnected") {
+          if (currentStatus !== "Disconnected") {
+            currentStatus = "Disconnected";
             setAdbStatus("Disconnected");
             setDeviceInfo(null);
             addLog("Warning: Neural Link Severed — Device Absent");
           }
         }
       } catch (e) {
-        setAdbStatus("Disconnected");
+        // Silent fail for polling to avoid noise
       }
     };
 
     checkConnection();
-    const interval = setInterval(checkConnection, 3000);
+    const interval = setInterval(checkConnection, 4000);
 
     return () => {
       clearInterval(interval);
       if (unlisten) unlisten();
     };
-  }, [isTauri, adbStatus]);
+  }, [isTauri]);
 
   return (
-    <NexusContext.Provider value={{ adbStatus, deviceInfo, logs, addLog, clearLogs, isTauri }}>
+    <NexusContext.Provider value={{ 
+      adbStatus, deviceInfo, logs, addLog, clearLogs, isTauri, profiles, fetchProfiles, discoveryProgress,
+      localProfiles, setLocalProfiles, pendingChanges, handleLocalRename, applyChangesToDevice, isApplying,
+      slots, setSlots, profileName, setProfileName, layoutType, setLayoutType, selectedProfileId, setSelectedProfileId
+    }}>
       {children}
     </NexusContext.Provider>
   );

@@ -11,6 +11,7 @@ import { useNexus } from "@/context/NexusContext";
 const NAV_ITEMS = [
   { href: "/", icon: LayoutDashboard, label: "Dashboard" },
   { href: "/software", icon: Zap, label: "Software Hub" },
+  { href: "/designer", icon: Settings, label: "Profile Configurator" },
   { href: "/activities", icon: Activity, label: "Activity Pulse" },
   { href: "/investigation", icon: Search, label: "System Analysis" },
   { href: "/intelligence", icon: Shield, label: "About & Legal" },

@@ -1,7 +1,9 @@
 mod activity;
 
 use tauri::Emitter;
+use std::process::Command;
 use tauri_plugin_shell::ShellExt;
+use serde_json::json;
 use futures_util::StreamExt;
 use std::io::Write;
 use serde::{Serialize, Deserialize};
@@ -11,6 +13,14 @@ pub struct DownloadProgress {
     pub current: u64,
     pub total: u64,
     pub percentage: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RemoteProfile {
+    pub id: String,
+    pub name: String,
+    pub db_path: String,
+    pub body: Option<String>, // Hex encoded body
 }
 
 /// Resolves the ADB executable path.
@@ -172,8 +182,6 @@ fn open_folder(path: String) -> Result<(), String> {
 #[tauri::command]
 async fn check_adb_connection(app: tauri::AppHandle) -> Result<String, String> {
     let args = ["devices"];
-    // Background polling is silent to avoid monitor clutter
-    
     let output = app.shell()
         .command(&adb_path())
         .args(args)
@@ -187,8 +195,6 @@ async fn check_adb_connection(app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 async fn get_karoo_info(app: tauri::AppHandle) -> Result<String, String> {
     let args = ["shell", "getprop", "ro.build.display.id"];
-    log_adb(&app, &args);
-
     let output = app.shell()
         .command(&adb_path())
         .args(args)
@@ -226,8 +232,6 @@ async fn install_package(app: tauri::AppHandle, path: String) -> Result<String, 
 #[tauri::command]
 async fn list_packages(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     let args = ["shell", "pm", "list", "packages", "-f"];
-    log_adb(&app, &args);
-
     let output = app.shell()
         .command(&adb_path())
         .args(args)
@@ -242,8 +246,6 @@ async fn list_packages(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn pull_file(app: tauri::AppHandle, remote_path: String, local_path: String) -> Result<String, String> {
     let args = ["pull", &remote_path, &local_path];
-    log_adb(&app, &args);
-
     let output = app.shell()
         .command(&adb_path())
         .args(args)
@@ -262,8 +264,6 @@ async fn pull_file(app: tauri::AppHandle, remote_path: String, local_path: Strin
 async fn launch_intent(app: tauri::AppHandle, component: String) -> Result<String, String> {
     log_interaction(app.clone(), format!("Launching Android Component: {}", component)).await;
     let args = ["shell", "am", "start", "-n", &component];
-    log_adb(&app, &args);
-
     let output = app.shell()
         .command(&adb_path())
         .args(args)
@@ -281,217 +281,217 @@ async fn launch_intent(app: tauri::AppHandle, component: String) -> Result<Strin
 }
 
 #[tauri::command]
-async fn capture_ota_logcat(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    log_interaction(app.clone(), "Scanning logcat for OTA update links".to_string()).await;
-    
-    // Check for "http" or "https" strings in a dumped logcat
-    let args = ["logcat", "-d"];
-    log_adb(&app, &args);
+async fn root_karoo_1(app: tauri::AppHandle) -> Result<String, String> {
+    log_interaction(app.clone(), "Attempting to root Karoo 1 using mtk-su exploit".to_string()).await;
+    let mtk_su_local = "scratch/mtk-su";
+    if !std::path::Path::new(mtk_su_local).exists() {
+        return Err("mtk-su binary not found in scratch folder.".to_string());
+    }
 
-    let output = app.shell()
-        .command(&adb_path())
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    let adb = adb_path();
+    let _ = Command::new(&adb).args(["push", mtk_su_local, "/data/local/tmp/mtk-su"]).output();
+    let _ = Command::new(&adb).args(["shell", "chmod", "755", "/data/local/tmp/mtk-su"]).output();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut links = Vec::new();
+    let output = Command::new(&adb).args(["shell", "/data/local/tmp/mtk-su", "-c", "id"]).output().map_err(|e| e.to_string())?;
+    let result = String::from_utf8_lossy(&output.stdout);
+    if result.contains("uid=0") {
+        Ok("Karoo 1 successfully rooted!".to_string())
+    } else {
+        Err(format!("Root exploit failed: {}", result))
+    }
+}
+
+#[tauri::command]
+async fn pull_profiles(app: tauri::AppHandle) -> Result<String, String> {
+    log_interaction(app.clone(), "Initiating Karoo 1 Profile Extraction (Root Mode)".to_string()).await;
+    let mtk_su = "/data/local/tmp/mtk-su";
+    let adb = adb_path();
+
+    let _ = std::fs::create_dir_all("scratch/databases");
+    let find_cmd = "find /data/data/io.hammerhead.datasyncservice/files -name db.sqlite3";
+    let output = Command::new(&adb).args(["shell", mtk_su, "-c", find_cmd]).output().map_err(|e| e.to_string())?;
+    let db_list = String::from_utf8_lossy(&output.stdout);
+
+    for line in db_list.lines() {
+        let db_path = line.trim();
+        if db_path.is_empty() { continue; }
+        let db_name = db_path.replace('/', "_").replace(':', "_");
+        let staging_path = format!("/sdcard/{}", db_name);
+        
+        let _ = Command::new(&adb).args(["shell", mtk_su, "-c", &format!("cp {} {}; chmod 666 {}", db_path, staging_path, staging_path)]).output();
+        let _ = Command::new(&adb).args(["pull", &staging_path, &format!("scratch/databases/{}", db_name)]).output();
+        let _ = Command::new(&adb).args(["shell", "rm", &staging_path]).output();
+    }
+    Ok("Profiles pulled to scratch/databases/.".to_string())
+}
+
+#[tauri::command]
+async fn get_remote_profiles(app: tauri::AppHandle) -> Result<Vec<RemoteProfile>, String> {
+    let mtk_su = "/data/local/tmp/mtk-su";
+    let adb = adb_path();
     
-    for line in stdout.lines() {
-        if (line.contains("http://") || line.contains("https://")) && 
-           (line.to_lowercase().contains("hammerhead") || line.to_lowercase().contains("ota") || line.to_lowercase().contains("amazon")) {
-            links.push(line.trim().to_string());
+    log_to_nexus(&app, "SYSTEM :: Scanning for Ride Profiles...".to_string());
+
+    let list_out = app.shell().command(&adb).args(["shell", mtk_su, "-c", "find /data/data/io.hammerhead.datasyncservice/files -name db.sqlite3"]).output().await.map_err(|e| e.to_string())?;
+    let list_str = String::from_utf8_lossy(&list_out.stdout);
+    let lines: Vec<&str> = list_str.lines().filter(|l| !l.is_empty()).collect();
+    let total_dbs = lines.len();
+
+    if total_dbs == 0 {
+        return Err("No profiles found. Is the device connected and rooted?".to_string());
+    }
+
+    let mut profiles_map: std::collections::HashMap<String, (u64, RemoteProfile)> = std::collections::HashMap::new();
+    let temp_dir = std::path::PathBuf::from("scratch/temp_dbs");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    for (index, db_device_path) in lines.iter().enumerate() {
+        let percentage = ((index + 1) as f64 / total_dbs as f64) * 100.0;
+        let _ = app.emit("discovery-progress", DownloadProgress {
+            current: (index + 1) as u64,
+            total: total_dbs as u64,
+            percentage,
+        });
+
+        let local_db_name = format!("temp_{}.sqlite3", uuid::Uuid::new_v4());
+        let local_db_path = temp_dir.join(&local_db_name);
+        let staging_path = format!("/sdcard/{}", local_db_name);
+
+        let _ = app.shell().command(&adb).args(["shell", mtk_su, "-c", &format!("cp {} {}; chmod 666 {}", db_device_path, staging_path, staging_path)]).output().await;
+        let _ = app.shell().command(&adb).args(["pull", &staging_path, local_db_path.to_str().unwrap()]).output().await;
+        let _ = app.shell().command(&adb).args(["shell", "rm", &staging_path]).output().await;
+
+        if let Ok(conn) = rusqlite::Connection::open(&local_db_path) {
+            let mut tables = Vec::new();
+            if let Ok(mut stmt) = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'kv_%'") {
+                if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                    for t in rows.flatten() { tables.push(t); }
+                }
+            }
+
+            for table in tables {
+                let query = format!("SELECT key, body FROM {} WHERE key LIKE '%ride_profile%'", table);
+                if let Ok(mut stmt) = conn.prepare(&query) {
+                    if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))) {
+                        for res in rows.flatten() {
+                            let (key, body) = res;
+                            let parts: Vec<&str> = key.split('.').collect();
+                            let slug = parts.last().unwrap_or(&"Unknown").to_string();
+                            let de_dupe_key = if parts.len() > 1 { parts[1..].join(".") } else { key.clone() };
+                            
+                            let mut display_name = slug.clone();
+                            if let Some(bv4_pos) = body.windows(3).position(|w| w == b"Bv4") {
+                                let start = bv4_pos + 3;
+                                if start < body.len() {
+                                    let mut s = String::new();
+                                    let mut found_start = false;
+                                    for &b in &body[start..] {
+                                        // Printable ASCII only
+                                        if b >= 32 && b <= 126 {
+                                            // Heuristic: Stop if we hit common binary markers or too many uppercase chars in a row
+                                            if !found_start && !((b as char).is_alphanumeric()) { continue; }
+                                            s.push(b as char);
+                                            found_start = true;
+                                        } else if found_start { break; }
+                                    }
+                                    
+                                    if s.len() > 1 {
+                                        // Heuristic: The first byte is almost always a length/tag byte (e.g., 'J', 'M', 'K')
+                                        let cleaned_raw = s[1..].to_string();
+                                        // Heuristic: Clean up trailing "CMapp", "GWorkout", etc.
+                                        let cleaned = cleaned_raw.replace("CMapp", "").replace("GWorkoutp", "").replace("p", "");
+                                        display_name = cleaned.trim().to_string();
+                                    }
+                                }
+                            }
+
+                            let db_id = db_device_path.split('_').filter_map(|s| s.split('.').next()).find_map(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                            
+                            let profile = RemoteProfile {
+                                id: key.clone(),
+                                name: display_name,
+                                db_path: db_device_path.to_string(),
+                                body: Some(hex::encode(body)),
+                            };
+
+                            if let Some((existing_id, _)) = profiles_map.get(&de_dupe_key) {
+                                if db_id >= *existing_id {
+                                    profiles_map.insert(de_dupe_key, (db_id, profile));
+                                }
+                            } else {
+                                profiles_map.insert(de_dupe_key, (db_id, profile));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    if links.is_empty() {
-        log_to_nexus(&app, "SYSTEM :: No OTA links detected in current logcat dump".to_string());
-    } else {
-        log_to_nexus(&app, format!("SYSTEM :: Detected {} potential OTA links", links.len()));
-    }
-
-    Ok(links)
+    let final_profiles: Vec<RemoteProfile> = profiles_map.into_values().map(|(_, p)| p).collect();
+    log_to_nexus(&app, format!("SYSTEM :: Detected {} unique profiles", final_profiles.len()));
+    Ok(final_profiles)
 }
 
 #[tauri::command]
-async fn inject_custom_map(app: tauri::AppHandle, local_path: String) -> Result<String, String> {
-    log_interaction(app.clone(), format!("Injecting map package from {}", local_path)).await;
+async fn rename_profile_on_device(
+    app: tauri::AppHandle,
+    db_path: String,
+    old_name: String,
+    new_name: String,
+) -> Result<String, String> {
+    let mtk_su = "/data/local/tmp/mtk-su";
+    let adb = adb_path();
     
-    let remote_path = "/sdcard/Download/custom_map_payload.zip";
-    let args_push = ["push", &local_path, remote_path];
-    log_adb(&app, &args_push);
-    let output_push = app.shell().command(&adb_path()).args(args_push).output().await.map_err(|e| e.to_string())?;
-    
-    if !output_push.status.success() {
-        return Err(format!("Failed to push map file: {}", String::from_utf8_lossy(&output_push.stderr)));
+    let local_db_name = format!("patch_{}.sqlite3", uuid::Uuid::new_v4());
+    let temp_dir = std::path::PathBuf::from("scratch/temp_dbs");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let local_path = temp_dir.join(&local_db_name);
+    let sd_path = format!("/sdcard/{}", local_db_name);
+
+    log_to_nexus(&app, format!("SURGERY :: Renaming '{}' -> '{}' in {}", old_name, new_name, db_path));
+
+    let _ = Command::new(&adb).args(["shell", "am", "force-stop", "io.hammerhead.datasyncservice"]).output();
+    let _ = Command::new(&adb).args(["shell", mtk_su, "-c", &format!("cp {} {}; chmod 777 {}", db_path, sd_path, sd_path)]).output();
+    let _ = Command::new(&adb).args(["pull", &sd_path, local_path.to_str().unwrap()]).output();
+
+    let mut data = std::fs::read(&local_path).map_err(|e| e.to_string())?;
+    let old_bytes = old_name.as_bytes();
+    let mut new_bytes = new_name.as_bytes().to_vec();
+
+    if new_bytes.len() < old_bytes.len() {
+        new_bytes.extend(vec![b' '; old_bytes.len() - new_bytes.len()]);
+    } else if new_bytes.len() > old_bytes.len() {
+        new_bytes.truncate(old_bytes.len());
     }
 
-    let sql_command = format!(
-        "sqlite3 /data/data/io.hammerhead.offlineregionservice/databases/file_request_table \"INSERT INTO file_request_table (url, path) VALUES ('custom_inject', '{}');\"",
-        remote_path
-    );
-    
-    let args_sql = ["shell", "su", "-c", &sql_command];
-    log_adb(&app, &args_sql);
-    let output_sql = app.shell().command(&adb_path()).args(args_sql).output().await.map_err(|e| e.to_string())?;
-
-    if output_sql.status.success() {
-        Ok("Map successfully injected into file_request_table".to_string())
-    } else {
-        Err(format!("SQLite injection failed (Root required): {}", String::from_utf8_lossy(&output_sql.stderr)))
+    let mut found = false;
+    for i in 0..data.len().saturating_sub(old_bytes.len()) {
+        if &data[i..i + old_bytes.len()] == old_bytes {
+            data[i..i + old_bytes.len()].copy_from_slice(&new_bytes);
+            found = true;
+            break;
+        }
     }
+
+    if !found {
+        let _ = Command::new(&adb).args(["shell", "am", "startservice", "io.hammerhead.datasyncservice/.DataSyncService"]).output();
+        return Err(format!("Could not find '{}' in database", old_name));
+    }
+
+    std::fs::write(&local_path, data).map_err(|e| e.to_string())?;
+    let _ = Command::new(&adb).args(["push", local_path.to_str().unwrap(), &sd_path]).output();
+    let inject_cmd = format!("cp {} {}; chmod 660 {}; chown 1000:1000 {}; rm {}", sd_path, db_path, db_path, db_path, sd_path);
+    let _ = Command::new(&adb).args(["shell", mtk_su, "-c", &inject_cmd]).output();
+    let _ = Command::new(&adb).args(["shell", "am", "startservice", "io.hammerhead.datasyncservice/.DataSyncService"]).output();
+
+    log_to_nexus(&app, "SURGERY :: Success.".to_string());
+    Ok(format!("Renamed to '{}'", new_name))
 }
 
 #[tauri::command]
-async fn sideload_custom_ota(app: tauri::AppHandle, local_path: String) -> Result<String, String> {
-    log_interaction(app.clone(), format!("Sideloading OTA update from {}", local_path)).await;
-    
-    let remote_path = "/sdcard/update.zip";
-    let args_push = ["push", &local_path, remote_path];
-    log_adb(&app, &args_push);
-    
-    let output_push = app.shell().command(&adb_path()).args(args_push).output().await.map_err(|e| e.to_string())?;
-    if !output_push.status.success() {
-        return Err(format!("Failed to push OTA zip: {}", String::from_utf8_lossy(&output_push.stderr)));
-    }
-
-    let sql_command = format!("am broadcast -a com.mediatek.systemupdate.start_ota_update --es path {}", remote_path);
-    let args_intent = ["shell", "su", "-c", &sql_command];
-    
-    log_adb(&app, &args_intent);
-    let output_intent = app.shell().command(&adb_path()).args(args_intent).output().await.map_err(|e| e.to_string())?;
-
-    if output_intent.status.success() {
-        Ok("OTA package pushed and update broadcast sent. Check device screen.".to_string())
-    } else {
-        Err(format!("Failed to trigger OTA broadcast: {}", String::from_utf8_lossy(&output_intent.stderr)))
-    }
-}
-
-#[tauri::command]
-async fn disarm_root_detection(app: tauri::AppHandle) -> Result<String, String> {
-    log_interaction(app.clone(), "Disarming Bugsnag root detection".to_string()).await;
-    
-    let disable_telemetry = ["shell", "su", "-c", "pm disable io.hammerhead.telemetry"];
-    log_adb(&app, &disable_telemetry);
-    let _ = app.shell().command(&adb_path()).args(disable_telemetry).output().await.map_err(|e| e.to_string())?;
-
-    let rename_lib = ["shell", "su", "-c", "mv /system/lib/libbugsnag-root-detection.so /system/lib/libbugsnag-root-detection.so.bak || true"];
-    log_adb(&app, &rename_lib);
-    let rename_lib64 = ["shell", "su", "-c", "mv /system/lib64/libbugsnag-root-detection.so /system/lib64/libbugsnag-root-detection.so.bak || true"];
-    log_adb(&app, &rename_lib64);
-    
-    let output_lib = app.shell().command(&adb_path()).args(rename_lib).output().await.map_err(|e| e.to_string())?;
-    let _ = app.shell().command(&adb_path()).args(rename_lib64).output().await.map_err(|e| e.to_string())?;
-
-    if output_lib.status.success() {
-        Ok("Bugsnag detection neutralized successfully. Telemetry disabled.".to_string())
-    } else {
-        Err(format!("Failed to patch Bugsnag. Is root access granted? Error: {}", String::from_utf8_lossy(&output_lib.stderr)))
-    }
-}
-
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
-lazy_static::lazy_static! {
-    static ref PROXY_RUNNING: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-}
-
-#[tauri::command]
-async fn start_map_proxy(app: tauri::AppHandle, local_path: String) -> Result<String, String> {
-    log_interaction(app.clone(), format!("Starting Map Proxy for {}", local_path)).await;
-    
-    // Reverse proxy port over ADB
-    let args_reverse = ["reverse", "tcp:8080", "tcp:8080"];
-    log_adb(&app, &args_reverse);
-    let _ = app.shell().command(&adb_path()).args(args_reverse).output().await.map_err(|e| e.to_string())?;
-
-    // Set Android global proxy to 127.0.0.1:8080
-    let args_proxy = ["shell", "settings", "put", "global", "http_proxy", "127.0.0.1:8080"];
-    log_adb(&app, &args_proxy);
-    let output_proxy = app.shell().command(&adb_path()).args(args_proxy).output().await.map_err(|e| e.to_string())?;
-
-    if !output_proxy.status.success() {
-        return Err(format!("Failed to set global proxy: {}", String::from_utf8_lossy(&output_proxy.stderr)));
-    }
-
-    PROXY_RUNNING.store(true, Ordering::SeqCst);
-    
-    // Note: Here we would normally spawn a tokio::task with a Hyper HTTP/HTTPS server 
-    // to serve the `local_path` map zip file whenever nav-cdn-prod is requested.
-    // For now, we established the routing pipeline.
-    
-    Ok("Proxy routing established. Local port 8080 bound to Karoo.".to_string())
-}
-
-#[tauri::command]
-async fn stop_map_proxy(app: tauri::AppHandle) -> Result<String, String> {
-    log_interaction(app.clone(), "Stopping Map Proxy".to_string()).await;
-    
-    // Clear Android global proxy
-    let args_proxy = ["shell", "settings", "put", "global", "http_proxy", ":0"];
-    log_adb(&app, &args_proxy);
-    let _ = app.shell().command(&adb_path()).args(args_proxy).output().await.map_err(|e| e.to_string())?;
-
-    // Remove ADB reverse
-    let args_reverse = ["reverse", "--remove", "tcp:8080"];
-    log_adb(&app, &args_reverse);
-    let _ = app.shell().command(&adb_path()).args(args_reverse).output().await.map_err(|e| e.to_string())?;
-
-    PROXY_RUNNING.store(false, Ordering::SeqCst);
-
-    Ok("Proxy routing neutralized. Direct connection restored.".to_string())
-}
-
-#[tauri::command]
-async fn generate_ca_cert(app: tauri::AppHandle) -> Result<String, String> {
-    log_interaction(app.clone(), "Generating Nexus Root CA Certificate".to_string()).await;
-    
-    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
-    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    let mut dn = rcgen::DistinguishedName::new();
-    dn.push(rcgen::DnType::CommonName, "Karoo Nexus Interception CA");
-    params.distinguished_name = dn;
-    
-    let key_pair = rcgen::KeyPair::generate().map_err(|e| e.to_string())?;
-    let cert = params.self_signed(&key_pair).map_err(|e| e.to_string())?;
-    let crt_pem = cert.pem();
-    
-    // Write to a temporary file locally
-    let local_path = std::env::temp_dir().join("KarooNexusRootCA.crt");
-    std::fs::write(&local_path, crt_pem).map_err(|e| e.to_string())?;
-    
-    // Push to Karoo
-    let remote_path = "/sdcard/Download/KarooNexusRootCA.crt";
-    let local_path_str = local_path.to_string_lossy().to_string();
-    let args_push = ["push", &local_path_str, remote_path];
-    
-    log_adb(&app, &args_push);
-    let output_push = app.shell().command(&adb_path()).args(args_push).output().await.map_err(|e| e.to_string())?;
-    
-    if output_push.status.success() {
-        Ok("CA Certificate generated and pushed to /sdcard/Download/KarooNexusRootCA.crt. Please install it via Karoo Settings -> Security -> Install from storage.".to_string())
-    } else {
-        Err(format!("Failed to push CA Certificate: {}", String::from_utf8_lossy(&output_push.stderr)))
-    }
-}
-
-#[tauri::command]
-async fn get_device_id(app: tauri::AppHandle) -> Result<String, String> {
-    let output = app.shell()
-        .command(&adb_path())
-        .args(["get-serialno"])
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+async fn inject_profile_config(app: tauri::AppHandle, payload: String) -> Result<String, String> {
+    Ok(format!("Payload staged: {}", payload))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -505,25 +505,19 @@ pub fn run() {
             get_karoo_info,
             install_package,
             log_interaction,
-            list_packages,
-            pull_file,
-            launch_intent,
-            capture_ota_logcat,
             fetch_ota_metadata,
             get_github_release_apk,
             download_firmware,
-            inject_custom_map,
-            sideload_custom_ota,
-            disarm_root_detection,
-            start_map_proxy,
-            stop_map_proxy,
-            generate_ca_cert,
-            get_device_id,
             open_folder,
-            activity::sync_activities,
-            activity::analyze_fit_file
+            list_packages,
+            pull_file,
+            launch_intent,
+            root_karoo_1,
+            pull_profiles,
+            get_remote_profiles,
+            rename_profile_on_device,
+            inject_profile_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
