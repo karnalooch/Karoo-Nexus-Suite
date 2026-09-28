@@ -188,6 +188,39 @@ jobs:
       - name: Reject frontend/backend command drift
         run: python3 scripts/check_tauri_command_contract.py
 
+  shadow-source:
+    name: Shadow source guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reject stale shadow source files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Non-compiled backup copies can silently preserve superseded security-sensitive code.
+          mapfile -t shadow_sources < <(
+            git ls-files \
+              'src-tauri/src/*_fixed.rs' \
+              'src-tauri/src/*.rs.bak' \
+              'src-tauri/src/*.rs.orig'
+          )
+
+          if (( ${#shadow_sources[@]} > 0 )); then
+            printf '::error::Stale shadow Rust source is tracked: %s\n' "${shadow_sources[*]}"
+            printf '%s\n' "${shadow_sources[@]}"
+            exit 1
+          fi
+
+          echo "shadow source guard: PASS"
+
   frontend:
     name: Frontend lint and build
     needs: changes
@@ -331,6 +364,7 @@ jobs:
       - governance
       - secret-guard
       - tauri-contract
+      - shadow-source
       - frontend
       - dependency-audit
       - rust
@@ -348,6 +382,7 @@ jobs:
           GOVERNANCE_RESULT: ${{ needs.governance.result }}
           SECRET_GUARD_RESULT: ${{ needs.secret-guard.result }}
           TAURI_CONTRACT_RESULT: ${{ needs.tauri-contract.result }}
+          SHADOW_SOURCE_RESULT: ${{ needs.shadow-source.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
           RUST_RESULT: ${{ needs.rust.result }}
@@ -386,6 +421,7 @@ jobs:
           require_success "governance" "${GOVERNANCE_RESULT}"
           require_success "secret-guard" "${SECRET_GUARD_RESULT}"
           require_success "tauri-contract" "${TAURI_CONTRACT_RESULT}"
+          require_success "shadow-source" "${SHADOW_SOURCE_RESULT}"
           require_success "security-base" "${SECURITY_RESULT}"
           require_optional "frontend" "${FRONTEND_EXPECTED}" "${FRONTEND_RESULT}"
           require_optional "dependency-audit" "${SECURITY_EXPECTED}" "${DEPENDENCY_AUDIT_RESULT}"
