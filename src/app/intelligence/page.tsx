@@ -95,7 +95,7 @@ export default function IntelligenceBureau() {
              >
                <div className="space-y-1">
                  <p className="text-sm font-black uppercase tracking-tight">{lic.name}</p>
-                 <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest italic">{lic.owner} // {lic.type}</p>
+                 <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest italic">{lic.owner} {" // "} {lic.type}</p>
                </div>
                <div className="p-3 bg-white/5 rounded-xl text-slate-500 group-hover:text-primary group-hover:bg-primary/10 transition-all">
                   <ExternalLink className="w-4 h-4" />
