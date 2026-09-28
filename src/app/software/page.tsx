@@ -62,13 +62,11 @@ export default function SoftwareHub() {
       logInteraction(`HUB :: Target found: ${apkUrl}`);
 
       const fileName = `${app.id}_latest.apk`;
-      const localPath = `tactical_cache/${fileName}`;
-      
       logInteraction(`HUB :: Streaming package to local cache...`);
-      await invoke("download_firmware", { url: apkUrl, localPath });
+      const downloadedPath = await invoke<string>("download_firmware", { url: apkUrl, fileName });
 
       logInteraction(`HUB :: Injecting package into Karoo neural link...`);
-      const res = await invoke("install_package", { path: localPath }) as string;
+      const res = await invoke("install_package", { path: downloadedPath }) as string;
       logInteraction(`HUB :: Success :: ${res}`);
       
       setDownloadProgress(null);
