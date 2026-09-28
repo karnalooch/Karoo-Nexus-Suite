@@ -1,6 +1,6 @@
 mod activity;
 
-use activity::{analyze_fit_file, sync_activities};
+use activity::sync_activities;
 
 use tauri::{Emitter, Manager};
 use std::process::Command;
@@ -1627,8 +1627,7 @@ pub fn run() {
             pull_profiles,
             get_remote_profiles,
             rename_profile_on_device,
-            sync_activities,
-            analyze_fit_file
+            sync_activities
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
