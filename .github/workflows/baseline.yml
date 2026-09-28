@@ -127,6 +127,7 @@ jobs:
         src-tauri/src/lib.rs
         src-tauri/Cargo.toml
         src-tauri/Cargo.lock
+        src/data/hub-data.json
         next.config.ts
 
   secret-guard:
