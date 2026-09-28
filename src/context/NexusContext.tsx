@@ -30,20 +30,20 @@ interface NexusContextType {
   
   // Designer State Persistence
   localProfiles: RemoteProfile[];
-  setLocalProfiles: (p: RemoteProfile[]) => void;
+  setLocalProfiles: React.Dispatch<React.SetStateAction<RemoteProfile[]>>;
   pendingChanges: Set<string>;
   handleLocalRename: (id: string, newName: string) => void;
   applyChangesToDevice: () => Promise<void>;
   isApplying: boolean;
   
   slots: (string | null)[];
-  setSlots: (s: (string | null)[]) => void;
+  setSlots: React.Dispatch<React.SetStateAction<(string | null)[]>>;
   profileName: string;
-  setProfileName: (n: string) => void;
+  setProfileName: React.Dispatch<React.SetStateAction<string>>;
   layoutType: number;
-  setLayoutType: (t: number) => void;
+  setLayoutType: React.Dispatch<React.SetStateAction<number>>;
   selectedProfileId: string | null;
-  setSelectedProfileId: (id: string | null) => void;
+  setSelectedProfileId: React.Dispatch<React.SetStateAction<string | null>>;
 }
 
 const NexusContext = createContext<NexusContextType | undefined>(undefined);
