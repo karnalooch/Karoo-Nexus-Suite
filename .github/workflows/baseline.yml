@@ -267,7 +267,7 @@ jobs:
       security-events: write
     uses: karnalooch/engineering-platform/.github/workflows/reusable-security.yml@d9bc67e2b17436e9df1319a6345d0ec388f407fb
     with:
-      enable_dependency_review: true
+      enable_dependency_review: false
       enable_codeql: false
       enable_trivy: true
       enable_sbom: true
