@@ -58,7 +58,7 @@ export default function SoftwareHub() {
     
     try {
       logInteraction(`HUB :: Searching GitHub Releases for ${app.owner}/${app.repo}...`);
-      const apkUrl = await invoke("get_github_release_apk", { owner: app.owner, repo: app.repo }) as string;
+      const apkUrl = await invoke("get_github_release_apk", { appId: app.id }) as string;
       logInteraction(`HUB :: Target found: ${apkUrl}`);
 
       const fileName = `${app.id}_latest.apk`;
