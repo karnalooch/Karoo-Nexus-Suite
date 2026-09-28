@@ -72,26 +72,61 @@ export function NexusProvider({ children }: { children: ReactNode }) {
   };
 
   const applyChangesToDevice = async () => {
+    if (pendingChanges.size === 0) return;
+
     setIsApplying(true);
     addLog("-- INITIALIZING SURGERY BATCH --");
+
+    const pendingIds = Array.from(pendingChanges);
+    const workingProfiles = new Map(profiles.map(profile => [profile.id, profile]));
+    let completed = 0;
+
     try {
-      for (const id of pendingChanges) {
-        const local = localProfiles.find(p => p.id === id);
-        const original = profiles.find(p => p.id === id);
-        if (local && original) {
-          addLog(`Patching ${original.name} -> ${local.name}...`);
-          await invoke("rename_profile_on_device", {
-            dbPath: original.db_path,
-            oldName: original.name,
-            newName: local.name
-          });
+      for (const id of pendingIds) {
+        const local = localProfiles.find(profile => profile.id === id);
+        const original = workingProfiles.get(id);
+
+        if (!local || !original) {
+          throw new Error(`Profile ${id} is no longer available; refresh before applying changes.`);
         }
+
+        if (local.name === original.name) {
+          setPendingChanges(prev => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+          continue;
+        }
+
+        addLog(`Patching ${original.name} -> ${local.name}...`);
+        await invoke("rename_profile_on_device", {
+          dbPath: original.db_path,
+          oldName: original.name,
+          newName: local.name
+        });
+
+        completed += 1;
+        const updatedProfile = { ...original, name: local.name };
+        workingProfiles.set(id, updatedProfile);
+        setProfiles(prev => prev.map(profile => (
+          profile.id === id ? { ...profile, name: local.name } : profile
+        )));
+        setPendingChanges(prev => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        addLog(`Applied ${original.name} -> ${local.name}.`);
       }
-      addLog("-- SUCCESS :: All patches applied. Syncing UI...");
-      setPendingChanges(new Set());
+
+      addLog("-- SUCCESS :: All pending patches applied. Syncing UI...");
       await fetchProfiles();
     } catch (err) {
-      addLog(`-- BATCH ERROR :: ${String(err)}`);
+      addLog(
+        `-- BATCH ERROR after ${completed}/${pendingIds.length} applied :: ${String(err)}`
+      );
+      addLog("-- Remaining local edits were kept pending for a safe retry.");
     } finally {
       setIsApplying(false);
     }
