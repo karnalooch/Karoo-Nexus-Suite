@@ -24,6 +24,14 @@ pub struct RemoteProfile {
     pub body: Option<String>, // Hex encoded body
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct AdbConnectionState {
+    pub status: String,
+    pub serial: Option<String>,
+    pub transport_count: usize,
+    pub authorized_count: usize,
+}
+
 #[derive(Deserialize)]
 struct HubCatalogEntry {
     id: String,
@@ -465,6 +473,47 @@ fn parse_package_listing(raw: &str) -> Result<Vec<String>, String> {
     }
 }
 
+fn parse_adb_connection_state(raw: &str) -> Result<AdbConnectionState, String> {
+    let mut transports: Vec<(String, String)> = Vec::new();
+
+    for raw_line in raw.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line == "List of devices attached" {
+            continue;
+        }
+
+        let mut parts = line.split_whitespace();
+        let serial = parts
+            .next()
+            .ok_or_else(|| "ADB device discovery returned a malformed row".to_string())?;
+        let state = parts
+            .next()
+            .ok_or_else(|| format!("ADB device discovery returned a malformed row: {line}"))?;
+
+        transports.push((serial.to_string(), state.to_string()));
+    }
+
+    let authorized: Vec<&str> = transports
+        .iter()
+        .filter_map(|(serial, state)| (state == "device").then_some(serial.as_str()))
+        .collect();
+
+    let (status, serial) = if transports.len() == 1 && authorized.len() == 1 {
+        ("Online", Some(authorized[0].to_string()))
+    } else if transports.len() > 1 {
+        ("Ambiguous", None)
+    } else {
+        ("Disconnected", None)
+    };
+
+    Ok(AdbConnectionState {
+        status: status.to_string(),
+        serial,
+        transport_count: transports.len(),
+        authorized_count: authorized.len(),
+    })
+}
+
 fn validate_remote_apk_path(raw_path: &str) -> Result<String, String> {
     let path = raw_path.trim();
     const ALLOWED_ROOTS: &[&str] = &[
@@ -896,7 +945,7 @@ fn open_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn check_adb_connection(app: tauri::AppHandle) -> Result<String, String> {
+async fn check_adb_connection(app: tauri::AppHandle) -> Result<AdbConnectionState, String> {
     let args = ["devices"];
     log_adb(&app, &args);
     let output = app
@@ -907,12 +956,13 @@ async fn check_adb_connection(app: tauri::AppHandle) -> Result<String, String> {
         .await
         .map_err(|e| format!("ADB device discovery could not start: {e}"))?;
 
-    checked_adb_step(
+    let stdout = checked_adb_step(
         "ADB device discovery",
         output.status.success(),
         &output.stdout,
         &output.stderr,
-    )
+    )?;
+    parse_adb_connection_state(&stdout)
 }
 
 #[tauri::command]
@@ -1802,6 +1852,51 @@ I/Noise: https://assets.cloudfront.net/image.png
         }
     }
 
+
+    #[test]
+    fn adb_session_is_online_only_for_exactly_one_authorized_transport() {
+        let state = parse_adb_connection_state(
+            "List of devices attached\nkaroo-123\tdevice product:karoo model:Karoo\n",
+        )
+        .unwrap();
+        assert_eq!(state.status, "Online");
+        assert_eq!(state.serial.as_deref(), Some("karoo-123"));
+        assert_eq!(state.transport_count, 1);
+        assert_eq!(state.authorized_count, 1);
+    }
+
+    #[test]
+    fn adb_session_fails_closed_when_multiple_transports_are_present() {
+        for raw in [
+            "List of devices attached\nkaroo-1\tdevice\nkaroo-2\tdevice\n",
+            "List of devices attached\nkaroo-1\tdevice\nphone-2\tunauthorized\n",
+        ] {
+            let state = parse_adb_connection_state(raw).unwrap();
+            assert_eq!(state.status, "Ambiguous");
+            assert!(state.serial.is_none());
+            assert_eq!(state.transport_count, 2);
+        }
+    }
+
+    #[test]
+    fn adb_session_distinguishes_missing_or_unavailable_devices() {
+        let none = parse_adb_connection_state("List of devices attached\n\n").unwrap();
+        assert_eq!(none.status, "Disconnected");
+        assert_eq!(none.transport_count, 0);
+        assert_eq!(none.authorized_count, 0);
+
+        let unauthorized =
+            parse_adb_connection_state("List of devices attached\nkaroo-1\tunauthorized\n")
+                .unwrap();
+        assert_eq!(unauthorized.status, "Disconnected");
+        assert_eq!(unauthorized.transport_count, 1);
+        assert_eq!(unauthorized.authorized_count, 0);
+
+        assert!(parse_adb_connection_state(
+            "List of devices attached\nmalformed-device-row\n"
+        )
+        .is_err());
+    }
 
     #[test]
     fn logged_url_drops_query_and_fragment() {
