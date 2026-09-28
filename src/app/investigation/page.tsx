@@ -9,7 +9,6 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { useNexus } from "@/context/NexusContext";
 
 import { TacticalDownloader } from "@/components/TacticalDownloader";
-import { generateCloudFrontUrl } from "@/utils/cloudfront";
 
 interface AppInfo {
   id: string;
@@ -189,27 +188,13 @@ export default function InvestigationPage() {
        setDownloaderOpen(true);
 
        const localPath = `${version}.zip`;
-       const path = metadata.key || metadata.bucket;
-       
-       if (metadata.key) {
-         try {
-           const signedUrl = await generateCloudFrontUrl(metadata.key);
-           setActiveDownloadUrl(signedUrl);
-           logInteraction(`INVESTIGATION :: AUTHENTICATED :: Generated Pre-Signed CloudFront URL`);
-           const absPath = await invoke<string>("download_firmware", { url: signedUrl, localPath });
-           setActiveDownloadedPath(absPath);
-           logInteraction(`INVESTIGATION :: SECURE TRANSFER :: Download Complete`);
-         } catch (e) {
-           console.error("CloudFront Signer failed:", e);
-           logInteraction(`INVESTIGATION :: CLOUDFRONT FAILURE :: ${e}`);
-           emit("firmware-download-error", e);
-         }
-       } else {
-         try {
-           await invoke("download_firmware", { url: downloadUrl, localPath });
-         } catch (e) {
-           emit("firmware-download-error", e);
-         }
+
+       try {
+         const absPath = await invoke<string>("download_firmware", { url: downloadUrl, localPath });
+         setActiveDownloadedPath(absPath);
+         logInteraction(`INVESTIGATION :: SECURE TRANSFER :: Download Complete`);
+       } catch (e) {
+         emit("firmware-download-error", e);
        }
 
      } catch (e) {
