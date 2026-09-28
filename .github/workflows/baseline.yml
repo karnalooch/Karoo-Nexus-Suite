@@ -259,6 +259,15 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Reject raw frontend shell capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -Eq '"shell:allow-(execute|spawn)"' src-tauri/capabilities/*.json; then
+            echo "::error::Raw frontend shell execute/spawn capability is forbidden."
+            exit 1
+          fi
+
       - name: Cargo check
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked
 
