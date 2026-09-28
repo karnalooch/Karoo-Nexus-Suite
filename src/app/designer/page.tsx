@@ -127,7 +127,7 @@ export default function DesignerPage() {
     }
   };
 
-  const selectRemoteProfile = (profile: any) => {
+  const selectRemoteProfile = (profile: { id: string; name: string }) => {
     setSelectedProfileId(profile.id);
     setProfileName(profile.name);
     addLog(`SELECTED :: ${profile.name} (${profile.id})`);

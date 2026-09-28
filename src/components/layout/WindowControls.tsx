@@ -2,27 +2,33 @@
 
 import React, { useEffect, useState } from "react";
 import { Minus, Square, X, Copy } from "lucide-react";
+import type { Window as TauriWindow } from "@tauri-apps/api/window";
 
 export function WindowControls() {
   const [isMaximized, setIsMaximized] = useState(false);
-  const [appWindow, setAppWindow] = useState<any>(null);
+  const [appWindow, setAppWindow] = useState<TauriWindow | null>(null);
 
   useEffect(() => {
-    if (typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__) {
-      import("@tauri-apps/api/window").then((module) => {
-        const win = module.getCurrentWindow();
-        setAppWindow(win);
-        
-        win.isMaximized().then(setIsMaximized);
-        const unlisten = win.onResized(() => {
-          win.isMaximized().then(setIsMaximized);
-        });
+    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
 
-        return () => {
-          unlisten.then((fn) => fn());
-        };
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void import("@tauri-apps/api/window").then(async (module) => {
+      const win = module.getCurrentWindow();
+      if (disposed) return;
+
+      setAppWindow(win);
+      setIsMaximized(await win.isMaximized());
+      unlisten = await win.onResized(async () => {
+        setIsMaximized(await win.isMaximized());
       });
-    }
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   const handleMinimize = () => appWindow?.minimize();

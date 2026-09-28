@@ -3,13 +3,17 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { Sun, Moon } from "lucide-react";
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
+
+const subscribeToClient = () => () => {};
 
 export function AtmosphereToggle() {
   const { theme, setTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => setMounted(true), []);
+  const mounted = useSyncExternalStore(
+    subscribeToClient,
+    () => true,
+    () => false,
+  );
 
   if (!mounted) return <div className="w-40 h-10 bg-slate-100 dark:bg-slate-900 rounded-2xl animate-pulse" />;
 

@@ -19,6 +19,17 @@ interface AppInfo {
   status: 'idle' | 'pulling' | 'success' | 'error' | 'unavailable';
 }
 
+interface OtaMetadata {
+  Message?: string;
+  updates?: Array<{ url: string; version: string }>;
+  url?: string;
+  version?: string;
+  download_url?: string;
+  build_number?: string;
+  bucket?: string;
+  key?: string;
+}
+
 const sanitizeFilename = (name: string): string => {
   return name.replace(/[<>:"/\\|?*]/g, "_").trim();
 };
@@ -95,7 +106,7 @@ export default function InvestigationPage() {
   const [logs, setLogs] = useState<{id: number, msg: string, time: Date}[]>([]);
 
   useEffect(() => {
-    let unlisten: any;
+    let unlisten: (() => void) | undefined;
     const setupListener = async () => {
       unlisten = await listen<string>("log_entry", (event) => {
         setLogs(prev => {
@@ -131,7 +142,7 @@ export default function InvestigationPage() {
   const fetchAndDownloadOTA = async (url: string) => {
      logInteraction(`INVESTIGATION :: Interrogating OTA Metadata Channel...`);
      try {
-       const metadata: any = await invoke("fetch_ota_metadata", { url });
+       const metadata = await invoke<OtaMetadata>("fetch_ota_metadata", { url });
        console.log("OTA Metadata received:", metadata);
        
        if (metadata.Message) {
@@ -745,7 +756,7 @@ export default function InvestigationPage() {
             <div className="space-y-2">
               <select 
                 value={otaTarget}
-                onChange={(e) => setOtaTarget(e.target.value as any)}
+                onChange={(e) => setOtaTarget(e.target.value as typeof otaTarget)}
                 className="w-full bg-background border border-border rounded-md p-3 text-xs focus:border-primary outline-none transition-all"
               >
                 <option value="karoo1">Target: Karoo 1 (Gen 1)</option>

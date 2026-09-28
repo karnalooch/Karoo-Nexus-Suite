@@ -1,39 +1,43 @@
 # Karoo Nexus Suite
 
-This is a [Next.js](https://nextjs.org) project for managing Hammerhead Karoo devices, built using Tauri.
+Desktop management suite for Hammerhead Karoo devices, built with Next.js and Tauri.
 
-## Getting Started
+## Requirements
 
-First, run the development server:
+- Node.js 22+
+- npm
+- Rust stable
+- Tauri system prerequisites for your platform
+- Android Platform Tools (ADB) for device features
+
+## Development
+
+Install JavaScript dependencies and start the frontend:
 
 ```bash
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+For the desktop application:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run tauri dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Validation
 
-## Learn More
+Frontend checks:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm run lint
+npm run build
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Rust/Tauri check:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+cargo check --manifest-path src-tauri/Cargo.toml --locked
+```
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
->>>>>>> bf2ea5e (feat: initial commit for Karoo Nexus Suite)
+The frontend uses Next.js static export so Tauri can load the generated `out/` directory.
