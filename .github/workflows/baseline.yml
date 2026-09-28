@@ -147,7 +147,10 @@ jobs:
 
           failed=0
 
-          if git grep -I -n -E --             '-----BEGIN ((RSA|EC|DSA|OPENSSH) )?PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY BLOCK-----'
+          private_key_pattern='-----BEGIN ((RSA|EC|DSA|OPENSSH) )?PRIVATE'" KEY-----"
+          pgp_key_pattern='-----BEGIN PGP PRIVATE'" KEY BLOCK-----"
+
+          if git grep -I -n -E -- "${private_key_pattern}|${pgp_key_pattern}"
           then
             echo "::error::Private-key material is tracked in the repository."
             failed=1
