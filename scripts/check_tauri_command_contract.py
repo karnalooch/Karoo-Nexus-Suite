@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed when frontend Tauri invokes drift from registered Rust commands."""
+"""Fail closed when frontend Tauri invokes and registered Rust commands drift."""
 
 from __future__ import annotations
 
@@ -13,6 +13,9 @@ RUST_LIB = ROOT / "src-tauri" / "src" / "lib.rs"
 # Legacy missing-command exceptions have been retired. Keep this explicit empty set:
 # any new frontend invoke without a registered backend command must fail closed.
 LEGACY_MISSING: set[str] = set()
+
+# Registered commands without a frontend consumer are forbidden by default.
+LEGACY_UNUSED_REGISTERED: set[str] = set()
 
 INVOKE = re.compile(
     r"""\binvoke(?:\s*<[^>]+>)?\s*\(\s*["'`]([A-Za-z_][A-Za-z0-9_]*)["'`]"""
@@ -47,36 +50,54 @@ def registered_commands() -> set[str]:
 
 def main() -> int:
     invoked = frontend_invokes()
+    invoked_names = set(invoked)
     registered = registered_commands()
-    missing = set(invoked) - registered
 
-    unexpected = missing - LEGACY_MISSING
-    stale_allowlist = LEGACY_MISSING - missing
+    missing = invoked_names - registered
+    unused_registered = registered - invoked_names
 
-    if unexpected:
+    unexpected_missing = missing - LEGACY_MISSING
+    unexpected_unused = unused_registered - LEGACY_UNUSED_REGISTERED
+    stale_missing_allowlist = LEGACY_MISSING - missing
+    stale_unused_allowlist = LEGACY_UNUSED_REGISTERED - unused_registered
+
+    if unexpected_missing:
         print("tauri contract: FAIL: frontend invokes unregistered commands:")
-        for name in sorted(unexpected):
+        for name in sorted(unexpected_missing):
             locations = ", ".join(sorted(invoked[name]))
             print(f"  - {name}: {locations}")
 
-    if stale_allowlist:
-        print("tauri contract: FAIL: remove resolved commands from LEGACY_MISSING:")
-        for name in sorted(stale_allowlist):
+    if unexpected_unused:
+        print("tauri contract: FAIL: registered commands without frontend consumers:")
+        for name in sorted(unexpected_unused):
             print(f"  - {name}")
 
-    if unexpected or stale_allowlist:
+    if stale_missing_allowlist:
+        print("tauri contract: FAIL: remove resolved commands from LEGACY_MISSING:")
+        for name in sorted(stale_missing_allowlist):
+            print(f"  - {name}")
+
+    if stale_unused_allowlist:
+        print(
+            "tauri contract: FAIL: remove resolved commands from "
+            "LEGACY_UNUSED_REGISTERED:"
+        )
+        for name in sorted(stale_unused_allowlist):
+            print(f"  - {name}")
+
+    if (
+        unexpected_missing
+        or unexpected_unused
+        or stale_missing_allowlist
+        or stale_unused_allowlist
+    ):
         return 1
 
     print(
         "tauri contract: PASS: "
-        f"{len(invoked)} frontend command(s), {len(registered)} registered command(s)"
+        f"{len(invoked_names)} frontend command(s), "
+        f"{len(registered)} registered command(s)"
     )
-    if missing:
-        print("tauri contract: known legacy gaps (must not grow):")
-        for name in sorted(missing):
-            locations = ", ".join(sorted(invoked[name]))
-            print(f"  - {name}: {locations}")
-
     return 0
 
 
