@@ -1,0 +1,93 @@
+name: Branch hygiene
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: branch-hygiene-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prune-merged-head:
+    name: Delete merged PR branch
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Delete branch only when ref still matches merged head SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          MERGED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          repository = os.environ["REPOSITORY"]
+          branch = os.environ["BRANCH"]
+          merged_head_sha = os.environ["MERGED_HEAD_SHA"]
+          token = os.environ["GH_TOKEN"]
+          encoded_ref = urllib.parse.quote(branch, safe="")
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "karoo-nexus-merged-branch-cleanup",
+          }
+
+          def request(method, path):
+              req = urllib.request.Request(
+                  f"https://api.github.com/{path}",
+                  headers=headers,
+                  method=method,
+              )
+              try:
+                  with urllib.request.urlopen(req) as response:
+                      body = response.read()
+                      return json.loads(body) if body else None
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 404:
+                      return None
+                  raise
+
+          ref = request("GET", f"repos/{repository}/git/ref/heads/{encoded_ref}")
+          if ref is None:
+              print(f"Branch {branch!r} is already absent.")
+              raise SystemExit(0)
+
+          current_sha = ref["object"]["sha"]
+          if current_sha != merged_head_sha:
+              raise SystemExit(
+                  f"Refused to delete {branch!r}: current SHA {current_sha} "
+                  f"does not match merged head SHA {merged_head_sha}."
+              )
+
+          dependents = request(
+              "GET",
+              f"repos/{repository}/pulls?state=open&base={encoded_ref}&per_page=1",
+          ) or []
+          if dependents:
+              print(
+                  f"Keeping merged branch {branch!r}: it is still the base of "
+                  f"open PR #{dependents[0]['number']}."
+              )
+              raise SystemExit(0)
+
+          request("DELETE", f"repos/{repository}/git/refs/heads/{encoded_ref}")
+          print(f"Deleted merged branch {branch!r} at {merged_head_sha}.")
+          PY

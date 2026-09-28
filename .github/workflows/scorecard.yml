@@ -1,0 +1,25 @@
+name: OpenSSF Scorecard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/scorecard.yml"
+  schedule:
+    - cron: "23 4 * * 3"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  scorecard:
+    name: Supply-chain posture audit
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+      id-token: write
+    uses: karnalooch/engineering-platform/.github/workflows/reusable-scorecard.yml@d9bc67e2b17436e9df1319a6345d0ec388f407fb
+    with:
+      publish_results: true
+      retention_days: 14

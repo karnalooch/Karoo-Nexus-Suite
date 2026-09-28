@@ -1,29 +1,192 @@
-name: Baseline CI
+name: Nexus CI
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: baseline-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: nexus-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  frontend:
-    name: Frontend lint and build
+  changes:
+    name: Classify changes
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      frontend: ${{ steps.classify.outputs.frontend }}
+      rust: ${{ steps.classify.outputs.rust }}
+      security: ${{ steps.classify.outputs.security }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify changed paths
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          PUSH_BEFORE_SHA: ${{ github.event.before || '' }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          frontend=false
+          rust=false
+          security=false
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            changed_files="$(git diff --name-only "${PR_BASE_SHA}" "${PR_HEAD_SHA}")"
+          elif [[ "${EVENT_NAME}" == "push" &&
+                  -n "${PUSH_BEFORE_SHA}" &&
+                  "${PUSH_BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]]; then
+            changed_files="$(git diff --name-only "${PUSH_BEFORE_SHA}" "${CURRENT_SHA}")"
+          else
+            changed_files="__ALL__"
+          fi
+
+          if [[ "${changed_files}" == "__ALL__" ]]; then
+            frontend=true
+            rust=true
+            security=true
+          else
+            while IFS= read -r path; do
+              [[ -z "${path}" ]] && continue
+
+              case "${path}" in
+                *.md|docs/*|LICENSE|LICENSE.*|THIRD-PARTY-NOTICES.md)
+                  ;;
+                src/*|src/**/*|public/*|public/**/*|package.json|package-lock.json|tsconfig.json|next.config.*|eslint.config.*|postcss.config.*|components.json)
+                  frontend=true
+                  ;;
+                src-tauri/*|src-tauri/**/*)
+                  rust=true
+                  ;;
+                .github/*|.github/**/*)
+                  frontend=true
+                  rust=true
+                  security=true
+                  ;;
+                *)
+                  # Unknown non-documentation paths fail safe through both build lanes.
+                  frontend=true
+                  rust=true
+                  security=true
+                  ;;
+              esac
+
+              case "${path}" in
+                package.json|package-lock.json|src-tauri/Cargo.toml|src-tauri/Cargo.lock|.github/*|.github/**/*)
+                  security=true
+                  ;;
+              esac
+            done <<< "${changed_files}"
+          fi
+
+          {
+            echo "frontend=${frontend}"
+            echo "rust=${rust}"
+            echo "security=${security}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "frontend=${frontend}"
+          echo "rust=${rust}"
+          echo "security=${security}"
+
+  repo-policy:
+    name: Repository policy
+    permissions:
+      contents: read
+    uses: karnalooch/engineering-platform/.github/workflows/reusable-repo-policy.yml@d9bc67e2b17436e9df1319a6345d0ec388f407fb
+    with:
+      max_non_lfs_mib: 10
+      forbidden_path_components: "node_modules,.next,out,target,dist"
+
+  governance:
+    name: Governance policy
+    permissions:
+      contents: read
+    uses: karnalooch/engineering-platform/.github/workflows/reusable-governance.yml@d9bc67e2b17436e9df1319a6345d0ec388f407fb
+    with:
+      additional_high_risk_patterns: |
+        src-tauri/capabilities/**
+        src-tauri/tauri.conf.json
+        src-tauri/src/lib.rs
+        src-tauri/Cargo.toml
+        src-tauri/Cargo.lock
+        next.config.ts
+
+  secret-guard:
+    name: Secret guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reject obvious private-key material and secret containers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          failed=0
+
+          private_key_pattern='-----BEGIN ((RSA|EC|DSA|OPENSSH) )?PRIVATE'" KEY-----"
+          pgp_key_pattern='-----BEGIN PGP PRIVATE'" KEY BLOCK-----"
+
+          if git grep -I -n -E -- "${private_key_pattern}|${pgp_key_pattern}"
+          then
+            echo "::error::Private-key material is tracked in the repository."
+            failed=1
+          fi
+
+          while IFS= read -r path; do
+            case "${path,,}" in
+              *.pem|*.key|*.p12|*.pfx)
+                echo "::error file=${path}::Secret-container file type must not be tracked."
+                failed=1
+                ;;
+            esac
+          done < <(git ls-files)
+
+          if [[ "${failed}" -ne 0 ]]; then
+            exit 1
+          fi
+
+          echo "secret guard: PASS"
+
+  frontend:
+    name: Frontend lint and build
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
           cache: npm
@@ -37,26 +200,159 @@ jobs:
       - name: Build
         run: npm run build
 
-  rust:
-    name: Rust check
+  dependency-audit:
+    name: NPM dependency audit
+    needs: changes
+    if: ${{ needs.changes.outputs.security == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Block high and critical npm advisories
+        run: npm audit --audit-level=high
+
+  rust:
+    name: Rust check
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
+      - name: Setup stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
 
       - name: Cargo check
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+
+  security-base:
+    name: Security baseline
+    permissions:
+      contents: read
+      security-events: write
+    uses: karnalooch/engineering-platform/.github/workflows/reusable-security.yml@d9bc67e2b17436e9df1319a6345d0ec388f407fb
+    with:
+      enable_dependency_review: false
+      enable_codeql: false
+      enable_trivy: true
+      enable_sbom: true
+      dependency_fail_severity: high
+      trivy_severity: "HIGH,CRITICAL"
+
+  codeql:
+    name: CodeQL JavaScript/TypeScript
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
+    permissions:
+      contents: read
+      security-events: write
+    uses: karnalooch/engineering-platform/.github/workflows/reusable-security.yml@d9bc67e2b17436e9df1319a6345d0ec388f407fb
+    with:
+      enable_dependency_review: false
+      enable_codeql: true
+      codeql_languages_json: '["javascript-typescript"]'
+      enable_trivy: false
+      enable_sbom: false
+
+  aggregate:
+    name: Aggregate CI gate
+    if: ${{ always() }}
+    needs:
+      - changes
+      - repo-policy
+      - governance
+      - secret-guard
+      - frontend
+      - dependency-audit
+      - rust
+      - security-base
+      - codeql
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Fail closed unless required lanes passed
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          REPO_POLICY_RESULT: ${{ needs.repo-policy.result }}
+          GOVERNANCE_RESULT: ${{ needs.governance.result }}
+          SECRET_GUARD_RESULT: ${{ needs.secret-guard.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          SECURITY_RESULT: ${{ needs.security-base.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+          FRONTEND_EXPECTED: ${{ needs.changes.outputs.frontend }}
+          SECURITY_EXPECTED: ${{ needs.changes.outputs.security }}
+          RUST_EXPECTED: ${{ needs.changes.outputs.rust }}
+        run: |
+          set -euo pipefail
+          failed=0
+
+          require_success() {
+            local name="$1"
+            local result="$2"
+            if [[ "${result}" != "success" ]]; then
+              echo "::error::${name}: expected success, got ${result}"
+              failed=1
+            fi
+          }
+
+          require_optional() {
+            local name="$1"
+            local expected="$2"
+            local result="$3"
+            if [[ "${expected}" == "true" ]]; then
+              require_success "${name}" "${result}"
+            elif [[ "${result}" != "skipped" ]]; then
+              echo "::error::${name}: expected skipped, got ${result}"
+              failed=1
+            fi
+          }
+
+          require_success "changes" "${CHANGES_RESULT}"
+          require_success "repo-policy" "${REPO_POLICY_RESULT}"
+          require_success "governance" "${GOVERNANCE_RESULT}"
+          require_success "secret-guard" "${SECRET_GUARD_RESULT}"
+          require_success "security-base" "${SECURITY_RESULT}"
+          require_optional "frontend" "${FRONTEND_EXPECTED}" "${FRONTEND_RESULT}"
+          require_optional "dependency-audit" "${SECURITY_EXPECTED}" "${DEPENDENCY_AUDIT_RESULT}"
+          require_optional "rust" "${RUST_EXPECTED}" "${RUST_RESULT}"
+          require_optional "codeql" "${FRONTEND_EXPECTED}" "${CODEQL_RESULT}"
+
+          if [[ "${failed}" -ne 0 ]]; then
+            exit 1
+          fi
+
+          echo "aggregate: PASS"
