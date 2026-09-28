@@ -502,6 +502,118 @@ fn validate_remote_apk_path(raw_path: &str) -> Result<String, String> {
     Ok(path.to_string())
 }
 
+const DATASYNC_DB_ROOT: &str = "/data/data/io.hammerhead.datasyncservice/files/";
+
+fn validate_profile_db_path(raw_path: &str) -> Result<String, String> {
+    let path = raw_path.trim();
+
+    if path.is_empty()
+        || path.len() > 1024
+        || !path.starts_with(DATASYNC_DB_ROOT)
+        || !path.ends_with("/db.sqlite3")
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || !path
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-'))
+    {
+        return Err("Profile database path is outside the approved DataSync tree".to_string());
+    }
+
+    if path
+        .split('/')
+        .skip(1)
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err("Profile database path contains unsafe segments".to_string());
+    }
+
+    Ok(path.to_string())
+}
+
+
+fn run_adb_checked(adb: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(adb)
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Err(if stderr.is_empty() { stdout } else { stderr });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn run_root_checked(adb: &str, command: &str) -> Result<String, String> {
+    run_adb_checked(adb, &["shell", "/data/local/tmp/mtk-su", "-c", command])
+}
+
+fn parse_profile_db_paths(raw: &str) -> Result<Vec<String>, String> {
+    let mut paths = Vec::new();
+
+    for line in raw.lines() {
+        let path = line.trim();
+        if path.is_empty() {
+            continue;
+        }
+        paths.push(validate_profile_db_path(path)?);
+    }
+
+    if paths.is_empty() {
+        return Err("No profiles found. Is the device connected and rooted?".to_string());
+    }
+
+    Ok(paths)
+}
+
+fn discover_profile_db_paths(adb: &str) -> Result<Vec<String>, String> {
+    let output = run_root_checked(
+        adb,
+        "find /data/data/io.hammerhead.datasyncservice/files -type f -name db.sqlite3 -print",
+    )?;
+    parse_profile_db_paths(&output)
+}
+
+fn combine_profile_transfer_results(
+    transfer: Result<(), String>,
+    cleanup: Result<(), String>,
+) -> Result<(), String> {
+    match (transfer, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(cleanup_error)) => {
+            Err(format!("Profile staging cleanup failed: {cleanup_error}"))
+        }
+        (Err(error), Err(cleanup_error)) => Err(format!(
+            "{error}; profile staging cleanup also failed: {cleanup_error}"
+        )),
+    }
+}
+
+fn stage_and_pull_profile_db(
+    adb: &str,
+    db_path: &str,
+    local_path: &std::path::Path,
+) -> Result<(), String> {
+    let db_path = validate_profile_db_path(db_path)?;
+    let staging_path = format!("/sdcard/nexus-profile-{}.sqlite3", uuid::Uuid::new_v4());
+
+    let transfer = run_root_checked(
+        adb,
+        &format!("cp {db_path} {staging_path}; chmod 666 {staging_path}"),
+    )
+    .and_then(|_| {
+        let local_path = local_path.to_string_lossy().to_string();
+        run_adb_checked(adb, &["pull", staging_path.as_str(), local_path.as_str()])
+    })
+    .map(|_| ());
+
+    let cleanup = run_root_checked(adb, &format!("rm -f {staging_path}")).map(|_| ());
+    combine_profile_transfer_results(transfer, cleanup)
+}
+
+
 fn redacted_url_for_log(url: &reqwest::Url) -> String {
     let mut redacted = url.clone();
     redacted.set_query(None);
@@ -1050,133 +1162,199 @@ async fn root_karoo_1(app: tauri::AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 async fn pull_profiles(app: tauri::AppHandle) -> Result<String, String> {
-    log_interaction(app.clone(), "Initiating Karoo 1 Profile Extraction (Root Mode)".to_string()).await;
-    let mtk_su = "/data/local/tmp/mtk-su";
+    log_interaction(
+        app.clone(),
+        "Initiating Karoo 1 Profile Extraction (Root Mode)".to_string(),
+    )
+    .await;
+
     let adb = adb_path();
+    let db_paths = discover_profile_db_paths(&adb)?;
+    let extraction_dir = managed_app_dir(&app, "profile-extractions")?;
 
-    let _ = std::fs::create_dir_all("scratch/databases");
-    let find_cmd = "find /data/data/io.hammerhead.datasyncservice/files -name db.sqlite3";
-    let output = Command::new(&adb).args(["shell", mtk_su, "-c", find_cmd]).output().map_err(|e| e.to_string())?;
-    let db_list = String::from_utf8_lossy(&output.stdout);
+    for (index, db_path) in db_paths.iter().enumerate() {
+        let local_path = extraction_dir.join(format!(
+            "profile-{:03}-{}.sqlite3",
+            index + 1,
+            uuid::Uuid::new_v4()
+        ));
 
-    for line in db_list.lines() {
-        let db_path = line.trim();
-        if db_path.is_empty() { continue; }
-        let db_name = db_path.replace(['/', ':'], "_");
-        let staging_path = format!("/sdcard/{}", db_name);
-        
-        let _ = Command::new(&adb).args(["shell", mtk_su, "-c", &format!("cp {} {}; chmod 666 {}", db_path, staging_path, staging_path)]).output();
-        let _ = Command::new(&adb).args(["pull", &staging_path, &format!("scratch/databases/{}", db_name)]).output();
-        let _ = Command::new(&adb).args(["shell", "rm", &staging_path]).output();
+        stage_and_pull_profile_db(&adb, db_path, &local_path).map_err(|error| {
+            let _ = std::fs::remove_file(&local_path);
+            format!(
+                "Profile extraction failed for database {}/{}: {}",
+                index + 1,
+                db_paths.len(),
+                error
+            )
+        })?;
     }
-    Ok("Profiles pulled to scratch/databases/.".to_string())
+
+    Ok(format!(
+        "Pulled {} profile database(s) to {}",
+        db_paths.len(),
+        extraction_dir.display()
+    ))
 }
 
 #[tauri::command]
 async fn get_remote_profiles(app: tauri::AppHandle) -> Result<Vec<RemoteProfile>, String> {
-    let mtk_su = "/data/local/tmp/mtk-su";
     let adb = adb_path();
-    
+
     log_to_nexus(&app, "SYSTEM :: Scanning for Ride Profiles...".to_string());
 
-    let list_out = app.shell().command(&adb).args(["shell", mtk_su, "-c", "find /data/data/io.hammerhead.datasyncservice/files -name db.sqlite3"]).output().await.map_err(|e| e.to_string())?;
-    let list_str = String::from_utf8_lossy(&list_out.stdout);
-    let lines: Vec<&str> = list_str.lines().filter(|l| !l.is_empty()).collect();
-    let total_dbs = lines.len();
+    let db_paths = discover_profile_db_paths(&adb)?;
+    let total_dbs = db_paths.len();
 
-    if total_dbs == 0 {
-        return Err("No profiles found. Is the device connected and rooted?".to_string());
-    }
+    let mut profiles_map: std::collections::HashMap<String, (u64, RemoteProfile)> =
+        std::collections::HashMap::new();
+    let temp_dir = managed_app_dir(&app, "profile-discovery")?;
 
-    let mut profiles_map: std::collections::HashMap<String, (u64, RemoteProfile)> = std::collections::HashMap::new();
-    let temp_dir = std::path::PathBuf::from("scratch/temp_dbs");
-    let _ = std::fs::create_dir_all(&temp_dir);
-
-    for (index, db_device_path) in lines.iter().enumerate() {
+    for (index, db_device_path) in db_paths.iter().enumerate() {
         let percentage = ((index + 1) as f64 / total_dbs as f64) * 100.0;
-        let _ = app.emit("discovery-progress", DownloadProgress {
-            current: (index + 1) as u64,
-            total: total_dbs as u64,
-            percentage,
-        });
+        let _ = app.emit(
+            "discovery-progress",
+            DownloadProgress {
+                current: (index + 1) as u64,
+                total: total_dbs as u64,
+                percentage,
+            },
+        );
 
-        let local_db_name = format!("temp_{}.sqlite3", uuid::Uuid::new_v4());
-        let local_db_path = temp_dir.join(&local_db_name);
-        let staging_path = format!("/sdcard/{}", local_db_name);
+        let local_db_path =
+            temp_dir.join(format!("profile-{}.sqlite3", uuid::Uuid::new_v4()));
 
-        let _ = app.shell().command(&adb).args(["shell", mtk_su, "-c", &format!("cp {} {}; chmod 666 {}", db_device_path, staging_path, staging_path)]).output().await;
-        let _ = app.shell().command(&adb).args(["pull", &staging_path, local_db_path.to_str().unwrap()]).output().await;
-        let _ = app.shell().command(&adb).args(["shell", "rm", &staging_path]).output().await;
+        stage_and_pull_profile_db(&adb, db_device_path, &local_db_path).map_err(|error| {
+            let _ = std::fs::remove_file(&local_db_path);
+            format!(
+                "Profile discovery failed while extracting database {}/{}: {}",
+                index + 1,
+                total_dbs,
+                error
+            )
+        })?;
 
-        if let Ok(conn) = rusqlite::Connection::open(&local_db_path) {
+        let parse_result = (|| -> Result<(), String> {
+            let conn = rusqlite::Connection::open(&local_db_path)
+                .map_err(|e| format!("Could not open staged profile database: {e}"))?;
+
             let mut tables = Vec::new();
-            if let Ok(mut stmt) = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'kv_%'") {
-                if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
-                    for t in rows.flatten() { tables.push(t); }
+            {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'kv_%'",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|e| e.to_string())?;
+                for table in rows {
+                    tables.push(table.map_err(|e| e.to_string())?);
                 }
             }
 
             for table in tables {
-                let query = format!("SELECT key, body FROM {} WHERE key LIKE '%ride_profile%'", table);
-                if let Ok(mut stmt) = conn.prepare(&query) {
-                    if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))) {
-                        for res in rows.flatten() {
-                            let (key, body) = res;
-                            let parts: Vec<&str> = key.split('.').collect();
-                            let slug = parts.last().unwrap_or(&"Unknown").to_string();
-                            let de_dupe_key = if parts.len() > 1 { parts[1..].join(".") } else { key.clone() };
-                            
-                            let mut display_name = slug.clone();
-                            if let Some(bv4_pos) = body.windows(3).position(|w| w == b"Bv4") {
-                                let start = bv4_pos + 3;
-                                if start < body.len() {
-                                    let mut s = String::new();
-                                    let mut found_start = false;
-                                    for &b in &body[start..] {
-                                        // Printable ASCII only
-                                        if (32..=126).contains(&b) {
-                                            // Heuristic: Stop if we hit common binary markers or too many uppercase chars in a row
-                                            if !found_start && !((b as char).is_alphanumeric()) { continue; }
-                                            s.push(b as char);
-                                            found_start = true;
-                                        } else if found_start { break; }
+                let quoted_table = table.replace('"', "\"\"");
+                let query = format!(
+                    "SELECT key, body FROM \"{quoted_table}\" WHERE key LIKE '%ride_profile%'"
+                );
+                let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(|e| e.to_string())?;
+
+                for row in rows {
+                    let (key, body) = row.map_err(|e| e.to_string())?;
+                    let parts: Vec<&str> = key.split('.').collect();
+                    let slug = parts.last().unwrap_or(&"Unknown").to_string();
+                    let de_dupe_key = if parts.len() > 1 {
+                        parts[1..].join(".")
+                    } else {
+                        key.clone()
+                    };
+
+                    let mut display_name = slug.clone();
+                    if let Some(bv4_pos) = body.windows(3).position(|w| w == b"Bv4") {
+                        let start = bv4_pos + 3;
+                        if start < body.len() {
+                            let mut s = String::new();
+                            let mut found_start = false;
+                            for &b in &body[start..] {
+                                if (32..=126).contains(&b) {
+                                    if !found_start && !(b as char).is_alphanumeric() {
+                                        continue;
                                     }
-                                    
-                                    if s.len() > 1 {
-                                        // Heuristic: The first byte is almost always a length/tag byte (e.g., 'J', 'M', 'K')
-                                        let cleaned_raw = s[1..].to_string();
-                                        // Heuristic: Clean up trailing "CMapp", "GWorkout", etc.
-                                        let cleaned = cleaned_raw.replace("CMapp", "").replace("GWorkoutp", "").replace("p", "");
-                                        display_name = cleaned.trim().to_string();
-                                    }
+                                    s.push(b as char);
+                                    found_start = true;
+                                } else if found_start {
+                                    break;
                                 }
                             }
 
-                            let db_id = db_device_path.split('_').filter_map(|s| s.split('.').next()).find_map(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                            
-                            let profile = RemoteProfile {
-                                id: key.clone(),
-                                name: display_name,
-                                db_path: db_device_path.to_string(),
-                                body: Some(hex::encode(body)),
-                            };
-
-                            if let Some((existing_id, _)) = profiles_map.get(&de_dupe_key) {
-                                if db_id >= *existing_id {
-                                    profiles_map.insert(de_dupe_key, (db_id, profile));
-                                }
-                            } else {
-                                profiles_map.insert(de_dupe_key, (db_id, profile));
+                            if s.len() > 1 {
+                                let cleaned_raw = s[1..].to_string();
+                                let cleaned = cleaned_raw
+                                    .replace("CMapp", "")
+                                    .replace("GWorkoutp", "")
+                                    .replace('p', "");
+                                display_name = cleaned.trim().to_string();
                             }
                         }
                     }
+
+                    let db_id = db_device_path
+                        .split('_')
+                        .filter_map(|s| s.split('.').next())
+                        .find_map(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+
+                    let profile = RemoteProfile {
+                        id: key.clone(),
+                        name: display_name,
+                        db_path: db_device_path.clone(),
+                        body: Some(hex::encode(body)),
+                    };
+
+                    if let Some((existing_id, _)) = profiles_map.get(&de_dupe_key) {
+                        if db_id >= *existing_id {
+                            profiles_map.insert(de_dupe_key, (db_id, profile));
+                        }
+                    } else {
+                        profiles_map.insert(de_dupe_key, (db_id, profile));
+                    }
                 }
             }
+
+            Ok(())
+        })();
+
+        let local_cleanup = std::fs::remove_file(&local_db_path);
+        if let Err(error) = parse_result {
+            return Err(format!(
+                "Profile discovery failed while parsing database {}/{}: {}",
+                index + 1,
+                total_dbs,
+                error
+            ));
+        }
+        if let Err(error) = local_cleanup {
+            return Err(format!(
+                "Profile discovery could not clean local staging file for database {}/{}: {}",
+                index + 1,
+                total_dbs,
+                error
+            ));
         }
     }
 
-    let final_profiles: Vec<RemoteProfile> = profiles_map.into_values().map(|(_, p)| p).collect();
-    log_to_nexus(&app, format!("SYSTEM :: Detected {} unique profiles", final_profiles.len()));
+    let final_profiles: Vec<RemoteProfile> =
+        profiles_map.into_values().map(|(_, profile)| profile).collect();
+    log_to_nexus(
+        &app,
+        format!("SYSTEM :: Detected {} unique profiles", final_profiles.len()),
+    );
     Ok(final_profiles)
 }
 
@@ -1566,6 +1744,64 @@ I/Noise: https://assets.cloudfront.net/image.png
             assert!(validate_remote_apk_path(path).is_err(), "{path}");
         }
     }
+
+    #[test]
+    fn device_profile_db_list_is_validated_fail_closed() {
+        let valid = parse_profile_db_paths(
+            "/data/data/io.hammerhead.datasyncservice/files/account_123/db.sqlite3\n\n",
+        )
+        .unwrap();
+        assert_eq!(valid.len(), 1);
+
+        let invalid = parse_profile_db_paths(
+            "/data/data/io.hammerhead.datasyncservice/files/account_123/db.sqlite3\n/data/local/tmp/db.sqlite3\n",
+        );
+        assert!(invalid.is_err());
+        assert!(parse_profile_db_paths("\n\n").is_err());
+    }
+
+    #[test]
+    fn profile_transfer_never_silences_cleanup_failures() {
+        assert!(combine_profile_transfer_results(Ok(()), Ok(())).is_ok());
+
+        let transfer_error =
+            combine_profile_transfer_results(Err("pull failed".to_string()), Ok(()))
+                .unwrap_err();
+        assert!(transfer_error.contains("pull failed"));
+
+        let cleanup_error =
+            combine_profile_transfer_results(Ok(()), Err("rm failed".to_string()))
+                .unwrap_err();
+        assert!(cleanup_error.contains("cleanup"));
+        assert!(cleanup_error.contains("rm failed"));
+
+        let combined_error = combine_profile_transfer_results(
+            Err("pull failed".to_string()),
+            Err("rm failed".to_string()),
+        )
+        .unwrap_err();
+        assert!(combined_error.contains("pull failed"));
+        assert!(combined_error.contains("rm failed"));
+    }
+
+    #[test]
+    fn profile_db_path_is_pinned_to_datasync_tree() {
+        assert!(validate_profile_db_path(
+            "/data/data/io.hammerhead.datasyncservice/files/account_123/db.sqlite3"
+        )
+        .is_ok());
+
+        for path in [
+            "/data/local/tmp/db.sqlite3",
+            "/data/data/io.hammerhead.datasyncservice/files/../shared/db.sqlite3",
+            "/data/data/io.hammerhead.datasyncservice/files/account/db.sqlite3;id",
+            "/data/data/io.hammerhead.datasyncservice/files/account/not-db.sqlite3",
+            "",
+        ] {
+            assert!(validate_profile_db_path(path).is_err(), "{path}");
+        }
+    }
+
 
     #[test]
     fn logged_url_drops_query_and_fragment() {
