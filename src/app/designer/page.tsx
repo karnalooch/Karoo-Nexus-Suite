@@ -41,7 +41,6 @@ export default function DesignerPage() {
   const [dragOverSlot, setDragOverSlot] = useState<number | null>(null);
   const [selectedMetric, setSelectedMetric] = useState<string | null>(null);
   
-  const [isCompiling, setIsCompiling] = useState(false);
   const [isRooting, setIsRooting] = useState(false);
   const [isPulling, setIsPulling] = useState(false);
 
@@ -109,24 +108,6 @@ export default function DesignerPage() {
     }
   };
 
-  const compileAndInject = async () => {
-    setIsCompiling(true);
-    try {
-       const payload = {
-         name: profileName,
-         layout: layoutType,
-         fields: slots.slice(0, numFields)
-       };
-       addLog(`COMPILER :: Payload ready: ${JSON.stringify(payload)}`);
-       const result = await invoke<string>("inject_profile_config", { payload: JSON.stringify(payload) });
-       addLog(`SUCCESS :: ${result}`);
-    } catch (err) {
-       addLog(`ERROR :: ${String(err)}`);
-    } finally {
-       setIsCompiling(false);
-    }
-  };
-
   const selectRemoteProfile = (profile: { id: string; name: string }) => {
     setSelectedProfileId(profile.id);
     setProfileName(profile.name);
@@ -165,7 +146,7 @@ export default function DesignerPage() {
       <header className="px-8 py-6 border-b border-border bg-background/50 backdrop-blur-md shrink-0 flex justify-between items-center z-10">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Profile Configurator</h1>
-          <p className="text-sm text-slate-500 mt-1">Design Custom Data Pages and push them directly to your Karoo 1 SQLite Database.</p>
+          <p className="text-sm text-slate-500 mt-1">Design Custom Data Pages. Direct device injection is deferred until a recoverable backend path is validated.</p>
         </div>
         <div className="flex flex-col items-end gap-2">
            <input 
@@ -380,18 +361,13 @@ export default function DesignerPage() {
                   <span className="text-xs">{isPulling ? 'Pulling...' : 'Pull'}</span>
                </button>
 
-               <button 
-                  onClick={compileAndInject}
-                  disabled={isCompiling || adbStatus !== "Online"}
-                  className="flex-1 min-w-[140px] relative group h-12 bg-primary text-white font-bold rounded-xl flex items-center justify-center gap-3 overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:scale-[1.02] active:scale-[0.98]"
+               <button
+                  disabled
+                  title="Deferred until profile injection has a validated format, rollback path, and real-device proof"
+                  className="flex-1 min-w-[140px] relative h-12 bg-primary text-white font-bold rounded-xl flex items-center justify-center gap-3 overflow-hidden opacity-50 cursor-not-allowed"
                >
-                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000" />
-                  {isCompiling ? (
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Save className="w-4 h-4" />
-                  )}
-                  <span className="text-xs text-white">Inject to K1</span>
+                  <Save className="w-4 h-4" />
+                  <span className="text-xs text-white">Inject Deferred</span>
                </button>
             </div>
                {adbStatus !== "Online" && (
