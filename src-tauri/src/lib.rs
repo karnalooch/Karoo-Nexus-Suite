@@ -179,6 +179,95 @@ fn extract_ota_urls(logcat: &str) -> Vec<String> {
     urls
 }
 
+const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+fn validate_declared_download_size(size: Option<u64>) -> Result<(), String> {
+    if let Some(size) = size {
+        if size > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "Download exceeds the {} byte safety limit",
+                MAX_DOWNLOAD_BYTES
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn advance_downloaded_bytes(current: u64, chunk_len: usize) -> Result<u64, String> {
+    let chunk_len =
+        u64::try_from(chunk_len).map_err(|_| "Download chunk length overflow".to_string())?;
+    let next = current
+        .checked_add(chunk_len)
+        .ok_or_else(|| "Downloaded byte count overflow".to_string())?;
+
+    if next > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "Download exceeds the {} byte safety limit",
+            MAX_DOWNLOAD_BYTES
+        ));
+    }
+
+    Ok(next)
+}
+
+struct StagedDownloadGuard {
+    path: std::path::PathBuf,
+    active: bool,
+}
+
+impl StagedDownloadGuard {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path, active: true }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for StagedDownloadGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn replace_staged_download(
+    staging_path: &std::path::Path,
+    final_path: &std::path::Path,
+) -> Result<(), String> {
+    let backup_path = final_path.with_file_name(format!(
+        ".nexus-download-backup-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let had_existing = final_path.exists();
+
+    if had_existing {
+        std::fs::rename(final_path, &backup_path)
+            .map_err(|e| format!("Could not preserve existing download: {e}"))?;
+    }
+
+    match std::fs::rename(staging_path, final_path) {
+        Ok(()) => {
+            if had_existing {
+                let _ = std::fs::remove_file(&backup_path);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if had_existing {
+                if let Err(rollback_error) = std::fs::rename(&backup_path, final_path) {
+                    return Err(format!(
+                        "CRITICAL: completed download install failed ({error}) and previous file restore failed ({rollback_error})"
+                    ));
+                }
+            }
+            Err(format!("Could not install completed download: {error}"))
+        }
+    }
+}
+
 fn validate_download_filename(file_name: &str) -> Result<(), String> {
     let trimmed = file_name.trim();
 
@@ -605,25 +694,39 @@ async fn download_firmware(
         return Err(format!("Download failed with status {status}"));
     }
 
-    let total_size = response.content_length().unwrap_or(0);
-    let download_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("downloads");
+    let total_size = response.content_length();
+    validate_declared_download_size(total_size)?;
 
-    std::fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
+    let download_dir = managed_app_dir(&app, "downloads")?;
     let local_path = download_dir.join(file_name.trim());
-    let mut file = std::fs::File::create(&local_path).map_err(|e| e.to_string())?;
+
+    if let Ok(metadata) = std::fs::symlink_metadata(&local_path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("Download destination is not a regular file".to_string());
+        }
+    }
+
+    let staging_path = download_dir.join(format!(
+        ".nexus-download-{}.part",
+        uuid::Uuid::new_v4()
+    ));
+    let mut staging_guard = StagedDownloadGuard::new(staging_path.clone());
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging_path)
+        .map_err(|e| e.to_string())?;
+
     let mut downloaded: u64 = 0;
     let mut stream = response.bytes_stream();
 
     while let Some(item) = stream.next().await {
-        let chunk = item.map_err(|e| e.to_string())?;
-        file.write_all(&chunk).map_err(|e| e.to_string())?;
-        downloaded += chunk.len() as u64;
+        let chunk = item.map_err(|e| format!("Download stream failed: {e}"))?;
+        downloaded = advance_downloaded_bytes(downloaded, chunk.len())?;
+        file.write_all(&chunk)
+            .map_err(|e| format!("Download write failed: {e}"))?;
 
-        if total_size > 0 {
+        if let Some(total_size) = total_size.filter(|size| *size > 0) {
             let percentage = (downloaded as f64 / total_size as f64) * 100.0;
             let _ = app.emit(
                 "firmware-download-progress",
@@ -636,8 +739,26 @@ async fn download_firmware(
         }
     }
 
+    file.flush()
+        .map_err(|e| format!("Download flush failed: {e}"))?;
+    drop(file);
+
+    if downloaded == 0 {
+        return Err("Download produced an empty file".to_string());
+    }
+    if let Some(expected) = total_size {
+        if downloaded != expected {
+            return Err(format!(
+                "Download length mismatch: expected {expected} bytes, received {downloaded}"
+            ));
+        }
+    }
+
+    replace_staged_download(&staging_path, &local_path)?;
+    staging_guard.disarm();
+
     let abs_path = std::fs::canonicalize(&local_path)
-        .unwrap_or(local_path)
+        .map_err(|_| "Completed download is missing after installation".to_string())?
         .to_string_lossy()
         .to_string();
     log_to_nexus(
@@ -1228,6 +1349,72 @@ I/Noise: https://assets.cloudfront.net/image.png
         ] {
             assert!(validate_apk_filename(file_name).is_err(), "{file_name}");
         }
+    }
+
+    #[test]
+    fn download_size_limit_applies_to_declared_and_streamed_bytes() {
+        assert!(validate_declared_download_size(None).is_ok());
+        assert!(validate_declared_download_size(Some(MAX_DOWNLOAD_BYTES)).is_ok());
+        assert!(validate_declared_download_size(Some(MAX_DOWNLOAD_BYTES + 1)).is_err());
+
+        assert_eq!(
+            advance_downloaded_bytes(MAX_DOWNLOAD_BYTES - 1, 1).unwrap(),
+            MAX_DOWNLOAD_BYTES
+        );
+        assert!(advance_downloaded_bytes(MAX_DOWNLOAD_BYTES, 1).is_err());
+    }
+
+    #[test]
+    fn staged_download_guard_cleans_uncommitted_files() {
+        let root = std::env::temp_dir().join(format!(
+            "karoo-nexus-staged-download-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let abandoned = root.join("abandoned.part");
+        std::fs::write(&abandoned, b"partial").unwrap();
+        {
+            let _guard = StagedDownloadGuard::new(abandoned.clone());
+        }
+        assert!(!abandoned.exists());
+
+        let committed = root.join("committed.part");
+        std::fs::write(&committed, b"complete").unwrap();
+        {
+            let mut guard = StagedDownloadGuard::new(committed.clone());
+            guard.disarm();
+        }
+        assert!(committed.exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn completed_download_replaces_existing_file_only_after_staging() {
+        let root = std::env::temp_dir().join(format!(
+            "karoo-nexus-download-replace-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let final_path = root.join("firmware.zip");
+        let staging_path = root.join("firmware.part");
+        std::fs::write(&final_path, b"old").unwrap();
+        std::fs::write(&staging_path, b"new").unwrap();
+
+        replace_staged_download(&staging_path, &final_path).unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"new");
+        assert!(!staging_path.exists());
+
+        let leftovers: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(leftovers.len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
