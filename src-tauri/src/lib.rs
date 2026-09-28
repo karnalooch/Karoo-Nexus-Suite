@@ -287,6 +287,50 @@ fn validate_android_component(raw: &str) -> Result<String, String> {
     }
 }
 
+fn validate_root_payload(path: &std::path::Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| "mtk-su binary not found in scratch folder".to_string())?;
+
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("mtk-su payload must be a regular file".to_string());
+    }
+    if metadata.len() == 0 {
+        return Err("mtk-su payload is empty".to_string());
+    }
+
+    Ok(())
+}
+
+fn checked_adb_step(
+    step: &str,
+    success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<String, String> {
+    let stdout = String::from_utf8_lossy(stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+
+    if success {
+        return Ok(stdout);
+    }
+
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "ADB command returned a non-zero status".to_string()
+    };
+
+    Err(format!("{step} failed: {detail}"))
+}
+
+fn root_identity_is_uid_zero(identity: &str) -> bool {
+    identity
+        .split_whitespace()
+        .any(|token| token == "uid=0" || token.starts_with("uid=0("))
+}
+
 fn validate_remote_apk_path(raw_path: &str) -> Result<String, String> {
     let path = raw_path.trim();
     const ALLOWED_ROOTS: &[&str] = &[
@@ -740,22 +784,76 @@ async fn launch_intent(app: tauri::AppHandle, component: String) -> Result<Strin
 
 #[tauri::command]
 async fn root_karoo_1(app: tauri::AppHandle) -> Result<String, String> {
-    log_interaction(app.clone(), "Attempting to root Karoo 1 using mtk-su exploit".to_string()).await;
-    let mtk_su_local = "scratch/mtk-su";
-    if !std::path::Path::new(mtk_su_local).exists() {
-        return Err("mtk-su binary not found in scratch folder.".to_string());
-    }
+    log_interaction(
+        app.clone(),
+        "Attempting to root Karoo 1 using mtk-su exploit".to_string(),
+    )
+    .await;
+
+    let mtk_su_local = std::path::Path::new("scratch/mtk-su");
+    validate_root_payload(mtk_su_local)?;
+    let mtk_su_local = mtk_su_local.to_string_lossy().to_string();
 
     let adb = adb_path();
-    let _ = Command::new(&adb).args(["push", mtk_su_local, "/data/local/tmp/mtk-su"]).output();
-    let _ = Command::new(&adb).args(["shell", "chmod", "755", "/data/local/tmp/mtk-su"]).output();
 
-    let output = Command::new(&adb).args(["shell", "/data/local/tmp/mtk-su", "-c", "id"]).output().map_err(|e| e.to_string())?;
-    let result = String::from_utf8_lossy(&output.stdout);
-    if result.contains("uid=0") {
+    let push_args = [
+        "push",
+        mtk_su_local.as_str(),
+        "/data/local/tmp/mtk-su",
+    ];
+    log_adb(&app, &push_args);
+    let push = app
+        .shell()
+        .command(&adb)
+        .args(push_args)
+        .output()
+        .await
+        .map_err(|e| format!("mtk-su upload could not start: {e}"))?;
+    checked_adb_step(
+        "mtk-su upload",
+        push.status.success(),
+        &push.stdout,
+        &push.stderr,
+    )?;
+
+    let chmod_args = ["shell", "chmod", "755", "/data/local/tmp/mtk-su"];
+    log_adb(&app, &chmod_args);
+    let chmod = app
+        .shell()
+        .command(&adb)
+        .args(chmod_args)
+        .output()
+        .await
+        .map_err(|e| format!("mtk-su chmod could not start: {e}"))?;
+    checked_adb_step(
+        "mtk-su chmod",
+        chmod.status.success(),
+        &chmod.stdout,
+        &chmod.stderr,
+    )?;
+
+    let identity_args = ["shell", "/data/local/tmp/mtk-su", "-c", "id"];
+    log_adb(&app, &identity_args);
+    let identity = app
+        .shell()
+        .command(&adb)
+        .args(identity_args)
+        .output()
+        .await
+        .map_err(|e| format!("root identity check could not start: {e}"))?;
+    let identity = checked_adb_step(
+        "root identity check",
+        identity.status.success(),
+        &identity.stdout,
+        &identity.stderr,
+    )?;
+
+    if root_identity_is_uid_zero(&identity) {
         Ok("Karoo 1 successfully rooted!".to_string())
     } else {
-        Err(format!("Root exploit failed: {}", result))
+        Err(format!(
+            "Root identity check completed without uid=0: {identity}"
+        ))
     }
 }
 
@@ -1059,6 +1157,66 @@ I/Noise: https://assets.cloudfront.net/image.png
             "",
         ] {
             assert!(validate_apk_filename(file_name).is_err(), "{file_name}");
+        }
+    }
+
+    #[test]
+    fn root_payload_must_be_a_non_empty_regular_file() {
+        let root = std::env::temp_dir().join(format!(
+            "karoo-nexus-root-payload-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let payload = root.join("mtk-su");
+        std::fs::write(&payload, b"payload").unwrap();
+        assert!(validate_root_payload(&payload).is_ok());
+
+        let empty = root.join("empty");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(validate_root_payload(&empty).is_err());
+        assert!(validate_root_payload(&root).is_err());
+        assert!(validate_root_payload(&root.join("missing")).is_err());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn adb_steps_fail_closed_and_preserve_useful_error_context() {
+        assert_eq!(
+            checked_adb_step("upload", true, b"1 file pushed", b"").unwrap(),
+            "1 file pushed"
+        );
+
+        let stderr_error =
+            checked_adb_step("upload", false, b"partial", b"device offline").unwrap_err();
+        assert!(stderr_error.contains("upload failed"));
+        assert!(stderr_error.contains("device offline"));
+
+        let stdout_error =
+            checked_adb_step("chmod", false, b"permission denied", b"").unwrap_err();
+        assert!(stdout_error.contains("permission denied"));
+
+        let empty_error = checked_adb_step("identity", false, b"", b"").unwrap_err();
+        assert!(empty_error.contains("non-zero status"));
+    }
+
+    #[test]
+    fn root_identity_requires_a_uid_zero_token() {
+        for identity in [
+            "uid=0(root) gid=0(root) groups=0(root)",
+            "uid=0 gid=0 groups=0",
+        ] {
+            assert!(root_identity_is_uid_zero(identity), "{identity}");
+        }
+
+        for identity in [
+            "uid=1000(shell) gid=1000(shell)",
+            "euid=0(root) uid=1000(shell)",
+            "fakeuid=0(root)",
+            "",
+        ] {
+            assert!(!root_identity_is_uid_zero(identity), "{identity}");
         }
     }
 
