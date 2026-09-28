@@ -257,6 +257,27 @@ fn managed_app_dir(app: &tauri::AppHandle, child: &str) -> Result<std::path::Pat
     std::fs::canonicalize(&dir).map_err(|e| e.to_string())
 }
 
+fn canonical_managed_file(
+    root: &std::path::Path,
+    raw_path: &str,
+) -> Result<std::path::PathBuf, String> {
+    let root = std::fs::canonicalize(root)
+        .map_err(|_| "Managed directory is unavailable".to_string())?;
+    let candidate = std::fs::canonicalize(raw_path)
+        .map_err(|_| "Requested managed file does not exist".to_string())?;
+
+    if !candidate.starts_with(&root) {
+        return Err("Requested file is outside the managed directory".to_string());
+    }
+
+    let metadata = std::fs::metadata(&candidate).map_err(|e| e.to_string())?;
+    if !metadata.is_file() {
+        return Err("Requested managed path is not a regular file".to_string());
+    }
+
+    Ok(candidate)
+}
+
 fn validate_managed_apk_path(
     app: &tauri::AppHandle,
     raw_path: &str,
@@ -603,12 +624,15 @@ async fn download_firmware(
 }
 
 #[tauri::command]
-fn open_folder(path: String) -> Result<(), String> {
-    let parent = std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new(&path));
-    let abs_path = std::fs::canonicalize(parent).unwrap_or(std::path::PathBuf::from(parent));
-    
+fn open_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let downloads_dir = managed_app_dir(&app, "downloads")?;
+    let managed_file = canonical_managed_file(&downloads_dir, &path)?;
+    let parent = managed_file
+        .parent()
+        .ok_or_else(|| "Managed download has no parent directory".to_string())?;
+
     std::process::Command::new("explorer")
-        .arg(abs_path)
+        .arg(parent)
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -1158,6 +1182,41 @@ I/Noise: https://assets.cloudfront.net/image.png
         ] {
             assert!(validate_apk_filename(file_name).is_err(), "{file_name}");
         }
+    }
+
+    #[test]
+    fn managed_file_boundary_rejects_paths_outside_the_download_root() {
+        let temp = std::env::temp_dir().join(format!(
+            "karoo-nexus-managed-file-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let downloads = temp.join("downloads");
+        let outside = temp.join("outside");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let inside_file = downloads.join("firmware.zip");
+        let outside_file = outside.join("secret.txt");
+        std::fs::write(&inside_file, b"zip").unwrap();
+        std::fs::write(&outside_file, b"secret").unwrap();
+
+        let resolved =
+            canonical_managed_file(&downloads, inside_file.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&inside_file).unwrap());
+
+        assert!(canonical_managed_file(
+            &downloads,
+            outside_file.to_str().unwrap()
+        )
+        .is_err());
+        assert!(canonical_managed_file(&downloads, downloads.to_str().unwrap()).is_err());
+        assert!(canonical_managed_file(
+            &downloads,
+            downloads.join("missing.zip").to_str().unwrap()
+        )
+        .is_err());
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
