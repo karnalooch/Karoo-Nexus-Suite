@@ -173,6 +173,21 @@ jobs:
 
           echo "secret guard: PASS"
 
+  tauri-contract:
+    name: Tauri command contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Reject frontend/backend command drift
+        run: python3 scripts/check_tauri_command_contract.py
+
   frontend:
     name: Frontend lint and build
     needs: changes
@@ -315,6 +330,7 @@ jobs:
       - repo-policy
       - governance
       - secret-guard
+      - tauri-contract
       - frontend
       - dependency-audit
       - rust
@@ -331,6 +347,7 @@ jobs:
           REPO_POLICY_RESULT: ${{ needs.repo-policy.result }}
           GOVERNANCE_RESULT: ${{ needs.governance.result }}
           SECRET_GUARD_RESULT: ${{ needs.secret-guard.result }}
+          TAURI_CONTRACT_RESULT: ${{ needs.tauri-contract.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
           RUST_RESULT: ${{ needs.rust.result }}
@@ -368,6 +385,7 @@ jobs:
           require_success "repo-policy" "${REPO_POLICY_RESULT}"
           require_success "governance" "${GOVERNANCE_RESULT}"
           require_success "secret-guard" "${SECRET_GUARD_RESULT}"
+          require_success "tauri-contract" "${TAURI_CONTRACT_RESULT}"
           require_success "security-base" "${SECURITY_RESULT}"
           require_optional "frontend" "${FRONTEND_EXPECTED}" "${FRONTEND_RESULT}"
           require_optional "dependency-audit" "${SECURITY_EXPECTED}" "${DEPENDENCY_AUDIT_RESULT}"
