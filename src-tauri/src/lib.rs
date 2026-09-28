@@ -273,6 +273,20 @@ fn validate_managed_apk_path(
     Ok(candidate)
 }
 
+const APPROVED_ANDROID_COMPONENTS: &[&str] = &[
+    "com.android.settings/.DevelopmentSettings",
+    "com.mediatek.engineermode/.EngineerMode",
+    "com.mediatek.systemupdate/.Main",
+];
+
+fn validate_android_component(raw: &str) -> Result<String, String> {
+    if APPROVED_ANDROID_COMPONENTS.contains(&raw) {
+        Ok(raw.to_string())
+    } else {
+        Err("Android component is not approved for launch".to_string())
+    }
+}
+
 fn validate_remote_apk_path(raw_path: &str) -> Result<String, String> {
     let path = raw_path.trim();
     const ALLOWED_ROOTS: &[&str] = &[
@@ -705,8 +719,9 @@ async fn pull_file(
 
 #[tauri::command]
 async fn launch_intent(app: tauri::AppHandle, component: String) -> Result<String, String> {
+    let component = validate_android_component(&component)?;
     log_interaction(app.clone(), format!("Launching Android Component: {}", component)).await;
-    let args = ["shell", "am", "start", "-n", &component];
+    let args = ["shell", "am", "start", "-n", component.as_str()];
     let output = app.shell()
         .command(adb_path())
         .args(args)
@@ -1044,6 +1059,26 @@ I/Noise: https://assets.cloudfront.net/image.png
             "",
         ] {
             assert!(validate_apk_filename(file_name).is_err(), "{file_name}");
+        }
+    }
+
+    #[test]
+    fn android_component_launches_are_exactly_allowlisted() {
+        for component in APPROVED_ANDROID_COMPONENTS {
+            assert_eq!(
+                validate_android_component(component).unwrap(),
+                component.to_string()
+            );
+        }
+
+        for component in [
+            "com.android.settings/.Settings",
+            "com.android.settings/.DevelopmentSettings ",
+            "com.mediatek.systemupdate/.Main\n",
+            "com.attacker/.Activity",
+            "",
+        ] {
+            assert!(validate_android_component(component).is_err(), "{component:?}");
         }
     }
 
