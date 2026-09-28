@@ -24,6 +24,38 @@ pub struct RemoteProfile {
     pub body: Option<String>, // Hex encoded body
 }
 
+#[derive(Deserialize)]
+struct HubCatalogEntry {
+    id: String,
+    owner: String,
+    repo: String,
+}
+
+const HUB_DATA_JSON: &str = include_str!("../../src/data/hub-data.json");
+
+fn valid_github_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+fn approved_hub_repo(app_id: &str) -> Result<(String, String), String> {
+    let catalog: Vec<HubCatalogEntry> = serde_json::from_str(HUB_DATA_JSON)
+        .map_err(|_| "Software Hub catalog is invalid".to_string())?;
+    let entry = catalog
+        .into_iter()
+        .find(|entry| entry.id == app_id)
+        .ok_or_else(|| "Software Hub app is not approved".to_string())?;
+
+    if !valid_github_segment(&entry.owner) || !valid_github_segment(&entry.repo) {
+        return Err("Software Hub repository identifier is invalid".to_string());
+    }
+
+    Ok((entry.owner, entry.repo))
+}
+
 /// Resolves the ADB executable path.
 pub(crate) fn adb_path() -> String {
     // Try PATH first
@@ -188,10 +220,16 @@ async fn fetch_ota_metadata(url: String) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-async fn get_github_release_apk(owner: String, repo: String) -> Result<String, String> {
-    let url = format!("https://api.github.com/repos/{}/{}/releases/latest", owner, repo);
-    let client = reqwest::Client::new();
-    let response = client.get(url)
+async fn get_github_release_apk(app_id: String) -> Result<String, String> {
+    let (owner, repo) = approved_hub_repo(&app_id)?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(url)
         .header("User-Agent", "Karoo-Nexus-Hub")
         .send()
         .await
@@ -202,14 +240,26 @@ async fn get_github_release_apk(owner: String, repo: String) -> Result<String, S
     }
 
     let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-    
-    let assets = json["assets"].as_array().ok_or("No assets found in latest release")?;
-    
+    let assets = json["assets"]
+        .as_array()
+        .ok_or_else(|| "No assets found in latest release".to_string())?;
+
     for asset in assets {
         let name = asset["name"].as_str().unwrap_or("");
-        if name.ends_with(".apk") {
-            return Ok(asset["browser_download_url"].as_str().unwrap_or("").to_string());
+        if !name.to_ascii_lowercase().ends_with(".apk") {
+            continue;
         }
+
+        let download_url = asset["browser_download_url"]
+            .as_str()
+            .ok_or_else(|| "APK asset has no download URL".to_string())?;
+        let parsed = validate_download_url(download_url)?;
+
+        if parsed.host_str() != Some("github.com") {
+            return Err("GitHub APK asset URL has an unexpected host".to_string());
+        }
+
+        return Ok(parsed.to_string());
     }
 
     Err("No APK found in the latest release assets".to_string())
@@ -690,6 +740,29 @@ mod security_tests {
             redacted_url_for_log(&url),
             "https://bucket.s3.amazonaws.com/update.zip"
         );
+    }
+
+    #[test]
+    fn software_hub_repositories_are_backend_approved() {
+        assert_eq!(
+            approved_hub_repo("ki2").unwrap(),
+            ("valterc".to_string(), "ki2".to_string())
+        );
+        assert!(approved_hub_repo("not-in-catalog").is_err());
+    }
+
+    #[test]
+    fn software_hub_catalog_has_unique_safe_repository_identifiers() {
+        let catalog: Vec<HubCatalogEntry> = serde_json::from_str(HUB_DATA_JSON).unwrap();
+        let mut ids = std::collections::HashSet::new();
+
+        assert!(!catalog.is_empty());
+
+        for entry in catalog {
+            assert!(ids.insert(entry.id));
+            assert!(valid_github_segment(&entry.owner));
+            assert!(valid_github_segment(&entry.repo));
+        }
     }
 }
 
