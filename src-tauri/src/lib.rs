@@ -812,6 +812,19 @@ fn parse_device_file_metadata(raw: &str) -> Result<(String, String, String), Str
     ))
 }
 
+fn profile_rollback_failure_message(
+    operation: &str,
+    primary_error: &str,
+    rollback_result: Result<String, String>,
+) -> String {
+    match rollback_result {
+        Ok(_) => format!("{operation} failed; original database restored: {primary_error}"),
+        Err(rollback_error) => format!(
+            "CRITICAL: {operation} failed and rollback also failed: {primary_error}; rollback: {rollback_error}"
+        ),
+    }
+}
+
 struct DataSyncServiceGuard {
     adb: String,
 }
@@ -1654,8 +1667,12 @@ async fn rename_profile_on_device(
         let rollback = format!(
             "cp {backup_db} {db_path};              if [ -f {backup_wal} ]; then cp {backup_wal} {db_path}-wal; else rm -f {db_path}-wal; fi;              if [ -f {backup_shm} ]; then cp {backup_shm} {db_path}-shm; else rm -f {db_path}-shm; fi;              chown {uid}:{gid} {db_path}; chmod {mode} {db_path};              if [ -f {db_path}-wal ]; then chown {uid}:{gid} {db_path}-wal; chmod 660 {db_path}-wal; fi;              if [ -f {db_path}-shm ]; then chown {uid}:{gid} {db_path}-shm; chmod 660 {db_path}-shm; fi"
         );
-        let _ = run_root_checked(&adb, &rollback);
-        return Err(format!("Profile replacement failed and rollback was attempted: {error}"));
+        let rollback_result = run_root_checked(&adb, &rollback);
+        return Err(profile_rollback_failure_message(
+            "Profile replacement",
+            &error,
+            rollback_result,
+        ));
     }
 
     let verify_stage = format!("cp {db_path} {sd_verify}; chmod 666 {sd_verify}");
@@ -1677,12 +1694,11 @@ async fn rename_profile_on_device(
             "cp {backup_db} {db_path};              if [ -f {backup_wal} ]; then cp {backup_wal} {db_path}-wal; else rm -f {db_path}-wal; fi;              if [ -f {backup_shm} ]; then cp {backup_shm} {db_path}-shm; else rm -f {db_path}-shm; fi;              chown {uid}:{gid} {db_path}; chmod {mode} {db_path};              if [ -f {db_path}-wal ]; then chown {uid}:{gid} {db_path}-wal; chmod 660 {db_path}-wal; fi;              if [ -f {db_path}-shm ]; then chown {uid}:{gid} {db_path}-shm; chmod 660 {db_path}-shm; fi"
         );
         let rollback_result = run_root_checked(&adb, &rollback);
-        return Err(match rollback_result {
-            Ok(_) => format!("Verification failed; original database restored: {error}"),
-            Err(rollback_error) => format!(
-                "CRITICAL: verification failed and rollback also failed: {error}; rollback: {rollback_error}"
-            ),
-        });
+        return Err(profile_rollback_failure_message(
+            "Verification",
+            &error,
+            rollback_result,
+        ));
     }
 
     let cleanup_command = format!("rm -f {sd_db} {sd_wal} {sd_shm} {sd_patched} {sd_verify}");
@@ -2178,6 +2194,29 @@ I/Noise: https://assets.cloudfront.net/image.png
             .any(|window| window == b"Tempo     "));
         drop(conn);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn profile_rollback_failure_reports_restore_and_double_failure() {
+        let restored = profile_rollback_failure_message(
+            "Profile replacement",
+            "install failed",
+            Ok("restored".to_string()),
+        );
+        assert_eq!(
+            restored,
+            "Profile replacement failed; original database restored: install failed"
+        );
+
+        let critical = profile_rollback_failure_message(
+            "Profile replacement",
+            "install failed",
+            Err("restore failed".to_string()),
+        );
+        assert_eq!(
+            critical,
+            "CRITICAL: Profile replacement failed and rollback also failed: install failed; rollback: restore failed"
+        );
     }
 
     #[test]
