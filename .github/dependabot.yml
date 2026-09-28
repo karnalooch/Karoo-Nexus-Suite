@@ -9,8 +9,14 @@ updates:
       time: "06:00"
       timezone: "Europe/Warsaw"
     open-pull-requests-limit: 3
+    allow:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
     groups:
       npm-minor-patch:
+        applies-to: version-updates
         patterns:
           - "*"
         update-types:
@@ -27,12 +33,16 @@ updates:
       time: "06:00"
       timezone: "Europe/Warsaw"
     open-pull-requests-limit: 3
+    allow:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-patch"
     groups:
-      cargo-minor-patch:
+      cargo-patch:
+        applies-to: version-updates
         patterns:
           - "*"
         update-types:
-          - minor
           - patch
     commit-message:
       prefix: "chore(deps)"
