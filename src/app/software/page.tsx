@@ -7,6 +7,7 @@ import {
   AlertCircle, ChevronRight, X, Shield, Star, Info,
   Map, Wind, Coffee, ShieldAlert, Cpu, Gauge
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
@@ -15,7 +16,10 @@ import { useNexus } from "@/context/NexusContext";
 
 import HUB_DATA from "@/data/hub-data.json";
 
-const CATEGORY_ICONS: Record<string, any> = {
+type HubApp = (typeof HUB_DATA)[number];
+type DownloadProgress = { percentage: number; current: number; total: number };
+
+const CATEGORY_ICONS: Record<string, LucideIcon> = {
   "Training": Gauge,
   "Navigation": Map,
   "System": Settings,
@@ -34,7 +38,7 @@ export default function SoftwareHub() {
   const [downloadProgress, setDownloadProgress] = useState<{percentage: number, current: number, total: number} | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("All");
-  const [selectedApp, setSelectedApp] = useState<any | null>(null);
+  const [selectedApp, setSelectedApp] = useState<HubApp | null>(null);
   const [installStatus, setInstallStatus] = useState<"idle" | "success" | "error">("idle");
   const { adbStatus } = useNexus();
   const isOffline = adbStatus !== "Online";
@@ -47,7 +51,7 @@ export default function SoftwareHub() {
     }
   };
 
-  const handleInstall = async (app: any) => {
+  const handleInstall = async (app: HubApp) => {
     setIsInstalling(app.id);
     setDownloadProgress(null);
     logInteraction(`HUB :: Initiating Tactical Deployment for ${app.name}`);
@@ -107,7 +111,7 @@ export default function SoftwareHub() {
   };
 
   useEffect(() => {
-    const unlisten = listen("tauri://drag-drop", (event: any) => {
+    const unlisten = listen<{ paths: string[] }>("tauri://drag-drop", (event) => {
       const paths = event.payload.paths;
       if (paths && paths.length > 0) {
         const apk = paths.find((p: string) => p.endsWith(".apk"));
@@ -116,7 +120,7 @@ export default function SoftwareHub() {
         }
       }
     });
-    const unlistenProgress = listen("firmware-download-progress", (event: any) => {
+    const unlistenProgress = listen<DownloadProgress>("firmware-download-progress", (event) => {
       setDownloadProgress(event.payload);
     });
 
@@ -142,7 +146,7 @@ export default function SoftwareHub() {
           <div className="space-y-2">
             <h1 className="text-3xl font-bold tracking-tight">Software Hub</h1>
             <p className="text-slate-500 font-medium max-w-2xl text-sm leading-relaxed">
-              Explore the ultimate collection of Hammerhead Karoo extensions. From performance metrics to tactical navigation, Nexus Hub connects you directly to the community's best.
+              Explore the ultimate collection of Hammerhead Karoo extensions. From performance metrics to tactical navigation, Nexus Hub connects you directly to the community&apos;s best.
             </p>
           </div>
           <div className="relative group max-w-md w-full">
