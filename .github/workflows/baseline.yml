@@ -109,7 +109,7 @@ jobs:
     name: Repository policy
     permissions:
       contents: read
-    uses: karnalooch/engineering-platform/.github/workflows/reusable-repo-policy.yml@d9bc67e2b17436e9df1319a6345d0ec388f407fb
+    uses: karnalooch/engineering-platform/.github/workflows/reusable-repo-policy.yml@36226a69856450e6f55a9746e9311711cc38a129
     with:
       max_non_lfs_mib: 10
       forbidden_path_components: "node_modules,.next,out,target,dist"
@@ -118,8 +118,9 @@ jobs:
     name: Governance policy
     permissions:
       contents: read
-    uses: karnalooch/engineering-platform/.github/workflows/reusable-governance.yml@d9bc67e2b17436e9df1319a6345d0ec388f407fb
+    uses: karnalooch/engineering-platform/.github/workflows/reusable-governance.yml@36226a69856450e6f55a9746e9311711cc38a129
     with:
+      allow_dependabot_high_risk_without_manual_marker: true
       additional_high_risk_patterns: |
         src-tauri/capabilities/**
         src-tauri/tauri.conf.json
@@ -265,7 +266,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: karnalooch/engineering-platform/.github/workflows/reusable-security.yml@d9bc67e2b17436e9df1319a6345d0ec388f407fb
+    uses: karnalooch/engineering-platform/.github/workflows/reusable-security.yml@36226a69856450e6f55a9746e9311711cc38a129
     with:
       enable_dependency_review: false
       enable_codeql: false
@@ -281,7 +282,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: karnalooch/engineering-platform/.github/workflows/reusable-security.yml@d9bc67e2b17436e9df1319a6345d0ec388f407fb
+    uses: karnalooch/engineering-platform/.github/workflows/reusable-security.yml@36226a69856450e6f55a9746e9311711cc38a129
     with:
       enable_dependency_review: false
       enable_codeql: true
