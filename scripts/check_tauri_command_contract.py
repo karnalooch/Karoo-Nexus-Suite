@@ -10,10 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_ROOT = ROOT / "src"
 RUST_LIB = ROOT / "src-tauri" / "src" / "lib.rs"
 
-# Existing Investigation controls that predate this contract. Keep this list shrinking:
-# implementing or removing one of these commands must remove it from this allowlist.
-LEGACY_MISSING = {
-}
+# Legacy missing-command exceptions have been retired. Keep this explicit empty set:
+# any new frontend invoke without a registered backend command must fail closed.
+LEGACY_MISSING: set[str] = set()
 
 INVOKE = re.compile(
     r"""\binvoke(?:\s*<[^>]+>)?\s*\(\s*["'`]([A-Za-z_][A-Za-z0-9_]*)["'`]"""
