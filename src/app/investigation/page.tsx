@@ -182,15 +182,14 @@ export default function InvestigationPage() {
 
        logInteraction(`INVESTIGATION :: Extracted Download URL: ${downloadUrl}`);
        
+       const fileName = `${sanitizeFilename(version)}.zip`;
        setActiveDownloadUrl(downloadUrl);
-       setActiveFileName(`${version}.zip`);
+       setActiveFileName(fileName);
        setActiveDownloadedPath(null);
        setDownloaderOpen(true);
 
-       const localPath = `${version}.zip`;
-
        try {
-         const absPath = await invoke<string>("download_firmware", { url: downloadUrl, localPath });
+         const absPath = await invoke<string>("download_firmware", { url: downloadUrl, fileName });
          setActiveDownloadedPath(absPath);
          logInteraction(`INVESTIGATION :: SECURE TRANSFER :: Download Complete`);
        } catch (e) {

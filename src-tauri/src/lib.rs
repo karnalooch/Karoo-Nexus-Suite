@@ -2,7 +2,7 @@ mod activity;
 
 use activity::{analyze_fit_file, sync_activities};
 
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use std::process::Command;
 use tauri_plugin_shell::ShellExt;
 use futures_util::StreamExt;
@@ -43,6 +43,105 @@ pub(crate) fn adb_path() -> String {
     "adb".to_string() // final fallback
 }
 
+const DOWNLOAD_HOST_SUFFIXES: &[&str] = &[
+    "hammerhead.io",
+    "amazonaws.com",
+    "github.com",
+    "githubusercontent.com",
+    "githubassets.com",
+    "cloudfront.net",
+];
+
+fn host_matches_suffix(host: &str, suffix: &str) -> bool {
+    host == suffix || host.ends_with(&format!(".{suffix}"))
+}
+
+fn validate_https_url(raw: &str, allowed_suffixes: &[&str]) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(raw).map_err(|_| "Invalid download URL".to_string())?;
+
+    if url.scheme() != "https" {
+        return Err("Only HTTPS URLs are allowed".to_string());
+    }
+
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Credentials in download URLs are not allowed".to_string());
+    }
+
+    if url.port().is_some_and(|port| port != 443) {
+        return Err("Only the standard HTTPS port is allowed".to_string());
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Download URL is missing a host".to_string())?
+        .to_ascii_lowercase();
+
+    if !allowed_suffixes
+        .iter()
+        .any(|suffix| host_matches_suffix(&host, suffix))
+    {
+        return Err(format!("Download host is not trusted: {host}"));
+    }
+
+    Ok(url)
+}
+
+fn validate_ota_metadata_url(raw: &str) -> Result<reqwest::Url, String> {
+    validate_https_url(raw, &["api.hammerhead.io"])
+}
+
+fn validate_download_url(raw: &str) -> Result<reqwest::Url, String> {
+    validate_https_url(raw, DOWNLOAD_HOST_SUFFIXES)
+}
+
+fn validate_download_filename(file_name: &str) -> Result<(), String> {
+    let trimmed = file_name.trim();
+
+    if trimmed.is_empty()
+        || trimmed.len() > 180
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains(':')
+    {
+        return Err("Invalid download filename".to_string());
+    }
+
+    let extension = std::path::Path::new(trimmed)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "Download filename must have an extension".to_string())?;
+
+    if extension != "zip" && extension != "apk" {
+        return Err("Only .zip and .apk downloads are allowed".to_string());
+    }
+
+    Ok(())
+}
+
+fn redacted_url_for_log(url: &reqwest::Url) -> String {
+    let mut redacted = url.clone();
+    redacted.set_query(None);
+    redacted.set_fragment(None);
+    redacted.to_string()
+}
+
+fn download_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.error("too many redirects");
+        }
+
+        if validate_download_url(attempt.url().as_str()).is_err() {
+            return attempt.error("redirect target is outside the trusted download hosts");
+        }
+
+        attempt.follow()
+    })
+}
+
 /// Helper to log messages to the frontend
 pub(crate) fn log_to_nexus(app: &tauri::AppHandle, msg: String) {
     let _ = app.emit("nexus-log", msg);
@@ -61,8 +160,14 @@ async fn log_interaction(app: tauri::AppHandle, action: String) {
 
 #[tauri::command]
 async fn fetch_ota_metadata(url: String) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
-    let response = client.get(url)
+    let url = validate_ota_metadata_url(&url)?;
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(url)
         .header("User-Agent", "Karoo-Nexus-Tactical")
         .send()
         .await
@@ -72,11 +177,14 @@ async fn fetch_ota_metadata(url: String) -> Result<serde_json::Value, String> {
         return Err("No update available (204 No Content)".to_string());
     }
 
-    let json = response.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("OTA metadata request failed: {}", response.status()));
+    }
 
-    Ok(json)
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -108,39 +216,53 @@ async fn get_github_release_apk(owner: String, repo: String) -> Result<String, S
 }
 
 #[tauri::command]
-async fn download_firmware(app: tauri::AppHandle, url: String, local_path: String) -> Result<String, String> {
-    log_interaction(app.clone(), format!("Initiating Tactical Download from {}", url)).await;
-    log_to_nexus(&app, format!("DEBUG :: Requesting URL: {}", url));
-    
+async fn download_firmware(
+    app: tauri::AppHandle,
+    url: String,
+    file_name: String,
+) -> Result<String, String> {
+    let url = validate_download_url(&url)?;
+    validate_download_filename(&file_name)?;
+
+    let safe_url = redacted_url_for_log(&url);
+    log_interaction(
+        app.clone(),
+        format!("Initiating Tactical Download from {safe_url}"),
+    )
+    .await;
+    log_to_nexus(&app, format!("DEBUG :: Requesting URL: {safe_url}"));
+
     let client = reqwest::Client::builder()
         .user_agent("Hammerhead/1.0")
+        .https_only(true)
+        .redirect(download_redirect_policy())
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let response = client.get(url.clone())
+    let response = client
+        .get(url)
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
     let status = response.status();
-    log_to_nexus(&app, format!("DEBUG :: Server Status: {}", status));
+    log_to_nexus(&app, format!("DEBUG :: Server Status: {status}"));
 
     if !status.is_success() {
-        let err_text = response.text().await.unwrap_or_else(|_| "Could not read error body".to_string());
-        log_to_nexus(&app, format!("DEBUG :: Server Error Body: {}", err_text));
-        let err_msg = format!("Download failed with status {}: {}", status, err_text);
-        return Err(err_msg);
+        return Err(format!("Download failed with status {status}"));
     }
 
     let total_size = response.content_length().unwrap_or(0);
-    
-    // Ensure parent directory exists
-    if let Some(parent) = std::path::Path::new(&local_path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
+    let download_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("downloads");
 
+    std::fs::create_dir_all(&download_dir).map_err(|e| e.to_string())?;
+    let local_path = download_dir.join(file_name.trim());
     let mut file = std::fs::File::create(&local_path).map_err(|e| e.to_string())?;
     let mut downloaded: u64 = 0;
     let mut stream = response.bytes_stream();
@@ -152,19 +274,25 @@ async fn download_firmware(app: tauri::AppHandle, url: String, local_path: Strin
 
         if total_size > 0 {
             let percentage = (downloaded as f64 / total_size as f64) * 100.0;
-            let _ = app.emit("firmware-download-progress", DownloadProgress {
-                current: downloaded,
-                total: total_size,
-                percentage,
-            });
+            let _ = app.emit(
+                "firmware-download-progress",
+                DownloadProgress {
+                    current: downloaded,
+                    total: total_size,
+                    percentage,
+                },
+            );
         }
     }
 
     let abs_path = std::fs::canonicalize(&local_path)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&local_path))
+        .unwrap_or(local_path)
         .to_string_lossy()
         .to_string();
-    log_to_nexus(&app, format!("SYSTEM :: Download Complete :: {}", abs_path));
+    log_to_nexus(
+        &app,
+        format!("SYSTEM :: Download Complete :: {abs_path}"),
+    );
     Ok(abs_path)
 }
 
@@ -493,6 +621,76 @@ async fn rename_profile_on_device(
 #[tauri::command]
 async fn inject_profile_config(_app: tauri::AppHandle, payload: String) -> Result<String, String> {
     Ok(format!("Payload staged: {}", payload))
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn ota_metadata_url_is_pinned_to_hammerhead_api() {
+        assert!(validate_ota_metadata_url(
+            "https://api.hammerhead.io/v1/device/update?deviceid=test"
+        )
+        .is_ok());
+        assert!(validate_ota_metadata_url("http://api.hammerhead.io/v1/device/update").is_err());
+        assert!(validate_ota_metadata_url("https://api.hammerhead.io.evil.example/v1").is_err());
+        assert!(validate_ota_metadata_url("https://127.0.0.1/v1").is_err());
+    }
+
+    #[test]
+    fn download_url_accepts_expected_public_providers_only() {
+        for url in [
+            "https://github.com/example/project/releases/download/v1/app.apk",
+            "https://objects.githubusercontent.com/path/app.apk",
+            "https://bucket.s3.us-east-1.amazonaws.com/update.zip",
+            "https://cdn.example.cloudfront.net/update.zip",
+            "https://downloads.hammerhead.io/update.zip",
+        ] {
+            assert!(validate_download_url(url).is_ok(), "{url}");
+        }
+
+        for url in [
+            "http://github.com/example/project/app.apk",
+            "https://localhost/update.zip",
+            "https://127.0.0.1/update.zip",
+            "https://github.com.evil.example/app.apk",
+            "https://example.com/update.zip",
+            "https://github.com:8443/example/app.apk",
+        ] {
+            assert!(validate_download_url(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn download_filename_cannot_escape_app_data_directory() {
+        for file_name in ["firmware.zip", "karoo-kactions_latest.apk", "update 1.2.zip"] {
+            assert!(validate_download_filename(file_name).is_ok(), "{file_name}");
+        }
+
+        for file_name in [
+            "../firmware.zip",
+            "nested/firmware.zip",
+            "nested\\firmware.zip",
+            "C:\\temp\\firmware.zip",
+            "package.json",
+            "",
+        ] {
+            assert!(validate_download_filename(file_name).is_err(), "{file_name}");
+        }
+    }
+
+    #[test]
+    fn logged_url_drops_query_and_fragment() {
+        let url = reqwest::Url::parse(
+            "https://bucket.s3.amazonaws.com/update.zip?X-Amz-Signature=secret#fragment",
+        )
+        .unwrap();
+        assert_eq!(
+            redacted_url_for_log(&url),
+            "https://bucket.s3.amazonaws.com/update.zip"
+        );
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
