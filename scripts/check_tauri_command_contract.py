@@ -13,7 +13,6 @@ RUST_LIB = ROOT / "src-tauri" / "src" / "lib.rs"
 # Existing Investigation controls that predate this contract. Keep this list shrinking:
 # implementing or removing one of these commands must remove it from this allowlist.
 LEGACY_MISSING = {
-    "capture_ota_logcat",
     "disarm_root_detection",
     "generate_ca_cert",
     "get_device_id",
