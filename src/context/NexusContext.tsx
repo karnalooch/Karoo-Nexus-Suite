@@ -4,6 +4,19 @@ import React, { createContext, useContext, useEffect, useState, ReactNode } from
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+export interface RemoteProfile {
+  id: string;
+  name: string;
+  db_path: string;
+  body?: string | null;
+}
+
+type DiscoveryProgress = {
+  percentage: number;
+  current: number;
+  total: number;
+};
+
 interface NexusContextType {
   adbStatus: string;
   deviceInfo: string | null;
@@ -11,13 +24,13 @@ interface NexusContextType {
   addLog: (msg: string) => void;
   clearLogs: () => void;
   isTauri: boolean;
-  profiles: any[];
+  profiles: RemoteProfile[];
   fetchProfiles: () => Promise<void>;
-  discoveryProgress: { percentage: number; current: number; total: number } | null;
+  discoveryProgress: DiscoveryProgress | null;
   
   // Designer State Persistence
-  localProfiles: any[];
-  setLocalProfiles: (p: any[]) => void;
+  localProfiles: RemoteProfile[];
+  setLocalProfiles: (p: RemoteProfile[]) => void;
   pendingChanges: Set<string>;
   handleLocalRename: (id: string, newName: string) => void;
   applyChangesToDevice: () => Promise<void>;
@@ -41,23 +54,17 @@ export function NexusProvider({ children }: { children: ReactNode }) {
   const [adbStatus, setAdbStatus] = useState("Disconnected");
   const [deviceInfo, setDeviceInfo] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>(["Neural Core Initialized...", "Awaiting Device Pulse..."]);
-  const [profiles, setProfiles] = useState<any[]>([]);
-  const [discoveryProgress, setDiscoveryProgress] = useState<{ percentage: number; current: number; total: number } | null>(null);
+  const [profiles, setProfiles] = useState<RemoteProfile[]>([]);
+  const [discoveryProgress, setDiscoveryProgress] = useState<DiscoveryProgress | null>(null);
 
   // Designer Persistent State
-  const [localProfiles, setLocalProfiles] = useState<any[]>([]);
+  const [localProfiles, setLocalProfiles] = useState<RemoteProfile[]>([]);
   const [pendingChanges, setPendingChanges] = useState<Set<string>>(new Set());
   const [isApplying, setIsApplying] = useState(false);
   const [slots, setSlots] = useState<(string | null)[]>(Array(10).fill(null));
   const [profileName, setProfileName] = useState("Nexus Custom Ride");
   const [layoutType, setLayoutType] = useState<number>(6);
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (profiles.length > 0) {
-      setLocalProfiles(profiles);
-    }
-  }, [profiles]);
 
   const handleLocalRename = (id: string, newName: string) => {
     setLocalProfiles(prev => prev.map(p => p.id === id ? { ...p, name: newName } : p));
@@ -91,7 +98,11 @@ export function NexusProvider({ children }: { children: ReactNode }) {
   };
 
   // Detect if running inside Tauri desktop app
-  const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+  const isTauri = React.useSyncExternalStore(
+    () => () => {},
+    () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window,
+    () => false,
+  );
 
   const addLog = (msg: string) => {
     setLogs(prev => {
@@ -117,8 +128,9 @@ export function NexusProvider({ children }: { children: ReactNode }) {
     if (isFetchingRef.current) return;
     isFetchingRef.current = true;
     try {
-      const p = await invoke("get_remote_profiles") as any[];
+      const p = await invoke<RemoteProfile[]>("get_remote_profiles");
       setProfiles(p);
+      setLocalProfiles(p);
       addLog(`Discovery Complete: Found ${p.length} profiles.`);
     } catch (e) {
       addLog(`Error: Profile Discovery Failed — ${String(e)}`);
@@ -130,10 +142,7 @@ export function NexusProvider({ children }: { children: ReactNode }) {
   };
 
   useEffect(() => {
-    if (!isTauri) {
-      setAdbStatus("Dev Mode");
-      return;
-    }
+    if (!isTauri) return;
 
     let unlisten: (() => void) | undefined;
     let unlistenProgress: (() => void) | undefined;
@@ -142,7 +151,7 @@ export function NexusProvider({ children }: { children: ReactNode }) {
       unlisten = await listen("nexus-log", (event) => {
         addLog(event.payload as string);
       });
-      unlistenProgress = await listen("discovery-progress", (event: any) => {
+      unlistenProgress = await listen<DiscoveryProgress>("discovery-progress", (event) => {
         setDiscoveryProgress(event.payload);
       });
     }
@@ -193,12 +202,15 @@ export function NexusProvider({ children }: { children: ReactNode }) {
     return () => {
       clearInterval(interval);
       if (unlisten) unlisten();
+      if (unlistenProgress) unlistenProgress();
     };
   }, [isTauri]);
 
+  const exposedAdbStatus = isTauri ? adbStatus : "Dev Mode";
+
   return (
     <NexusContext.Provider value={{ 
-      adbStatus, deviceInfo, logs, addLog, clearLogs, isTauri, profiles, fetchProfiles, discoveryProgress,
+      adbStatus: exposedAdbStatus, deviceInfo, logs, addLog, clearLogs, isTauri, profiles, fetchProfiles, discoveryProgress,
       localProfiles, setLocalProfiles, pendingChanges, handleLocalRename, applyChangesToDevice, isApplying,
       slots, setSlots, profileName, setProfileName, layoutType, setLayoutType, selectedProfileId, setSelectedProfileId
     }}>
