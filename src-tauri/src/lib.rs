@@ -1236,11 +1236,6 @@ async fn rename_profile_on_device(
     Ok(format!("Renamed to '{}'", new_name))
 }
 
-#[tauri::command]
-async fn inject_profile_config(_app: tauri::AppHandle, payload: String) -> Result<String, String> {
-    Ok(format!("Payload staged: {}", payload))
-}
-
 #[cfg(test)]
 mod security_tests {
     use super::*;
@@ -1632,7 +1627,6 @@ pub fn run() {
             pull_profiles,
             get_remote_profiles,
             rename_profile_on_device,
-            inject_profile_config,
             sync_activities,
             analyze_fit_file
         ])
