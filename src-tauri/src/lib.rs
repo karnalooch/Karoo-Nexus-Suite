@@ -184,7 +184,7 @@ fn open_folder(path: String) -> Result<(), String> {
 async fn check_adb_connection(app: tauri::AppHandle) -> Result<String, String> {
     let args = ["devices"];
     let output = app.shell()
-        .command(&adb_path())
+        .command(adb_path())
         .args(args)
         .output()
         .await
@@ -197,7 +197,7 @@ async fn check_adb_connection(app: tauri::AppHandle) -> Result<String, String> {
 async fn get_karoo_info(app: tauri::AppHandle) -> Result<String, String> {
     let args = ["shell", "getprop", "ro.build.display.id"];
     let output = app.shell()
-        .command(&adb_path())
+        .command(adb_path())
         .args(args)
         .output()
         .await
@@ -213,7 +213,7 @@ async fn install_package(app: tauri::AppHandle, path: String) -> Result<String, 
     log_adb(&app, &args[..]);
 
     let output = app.shell()
-        .command(&adb_path())
+        .command(adb_path())
         .args(args)
         .output()
         .await
@@ -234,7 +234,7 @@ async fn install_package(app: tauri::AppHandle, path: String) -> Result<String, 
 async fn list_packages(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     let args = ["shell", "pm", "list", "packages", "-f"];
     let output = app.shell()
-        .command(&adb_path())
+        .command(adb_path())
         .args(args)
         .output()
         .await
@@ -248,7 +248,7 @@ async fn list_packages(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 async fn pull_file(app: tauri::AppHandle, remote_path: String, local_path: String) -> Result<String, String> {
     let args = ["pull", &remote_path, &local_path];
     let output = app.shell()
-        .command(&adb_path())
+        .command(adb_path())
         .args(args)
         .output()
         .await
@@ -266,7 +266,7 @@ async fn launch_intent(app: tauri::AppHandle, component: String) -> Result<Strin
     log_interaction(app.clone(), format!("Launching Android Component: {}", component)).await;
     let args = ["shell", "am", "start", "-n", &component];
     let output = app.shell()
-        .command(&adb_path())
+        .command(adb_path())
         .args(args)
         .output()
         .await
@@ -316,7 +316,7 @@ async fn pull_profiles(app: tauri::AppHandle) -> Result<String, String> {
     for line in db_list.lines() {
         let db_path = line.trim();
         if db_path.is_empty() { continue; }
-        let db_name = db_path.replace('/', "_").replace(':', "_");
+        let db_name = db_path.replace(['/', ':'], "_");
         let staging_path = format!("/sdcard/{}", db_name);
         
         let _ = Command::new(&adb).args(["shell", mtk_su, "-c", &format!("cp {} {}; chmod 666 {}", db_path, staging_path, staging_path)]).output();
@@ -388,7 +388,7 @@ async fn get_remote_profiles(app: tauri::AppHandle) -> Result<Vec<RemoteProfile>
                                     let mut found_start = false;
                                     for &b in &body[start..] {
                                         // Printable ASCII only
-                                        if b >= 32 && b <= 126 {
+                                        if (32..=126).contains(&b) {
                                             // Heuristic: Stop if we hit common binary markers or too many uppercase chars in a row
                                             if !found_start && !((b as char).is_alphanumeric()) { continue; }
                                             s.push(b as char);
