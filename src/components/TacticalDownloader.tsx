@@ -1,7 +1,7 @@
 "use client";
 
-import { motion, AnimatePresence } from "framer-motion";
-import { Download, X, Zap, HardDrive, CheckCircle2, AlertCircle } from "lucide-react";
+import { motion } from "framer-motion";
+import { Download, X, Zap, HardDrive, CheckCircle2 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -26,18 +26,12 @@ export function TacticalDownloader({ isOpen, onClose, url, fileName, downloadedP
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isOpen) {
-      setProgress(null);
-      setStatus("idle");
-      setError(null);
-      return;
-    }
-
-    setStatus("downloading");
+    if (!isOpen) return;
 
     const unlistenProgress = listen("firmware-download-progress", (event) => {
       const payload = event.payload as DownloadProgress;
       setProgress(payload);
+      setStatus(payload.percentage >= 100 ? "complete" : "downloading");
       if (payload.percentage >= 100) {
         setStatus("complete");
       }
@@ -54,6 +48,13 @@ export function TacticalDownloader({ isOpen, onClose, url, fileName, downloadedP
       unlistenError.then(f => f());
     };
   }, [isOpen]);
+
+  const handleClose = () => {
+    setProgress(null);
+    setStatus("idle");
+    setError(null);
+    onClose();
+  };
 
   if (!isOpen) return null;
 
@@ -77,7 +78,7 @@ export function TacticalDownloader({ isOpen, onClose, url, fileName, downloadedP
                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mt-1">Syncing Firmware Stream</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full transition-all text-slate-500 hover:text-white">
+          <button onClick={handleClose} className="p-2 hover:bg-white/10 rounded-full transition-all text-slate-500 hover:text-white">
              <X className="w-6 h-6" />
           </button>
         </div>
@@ -146,7 +147,7 @@ export function TacticalDownloader({ isOpen, onClose, url, fileName, downloadedP
                  </button>
                )}
                <button 
-                 onClick={onClose}
+                 onClick={handleClose}
                  className="px-6 py-2 bg-emerald-500 text-black text-[10px] font-black uppercase tracking-widest rounded-full hover:shadow-lg transition-all"
                >
                   Close Channel
@@ -173,7 +174,7 @@ export function TacticalDownloader({ isOpen, onClose, url, fileName, downloadedP
               )}
             </div>
             <button
-               onClick={onClose}
+               onClick={handleClose}
                className="w-full py-3 bg-red-600 hover:bg-red-500 text-white rounded-lg font-bold transition-all"
             >
               Reset Hook
