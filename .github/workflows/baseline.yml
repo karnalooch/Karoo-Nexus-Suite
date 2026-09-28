@@ -205,6 +205,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Non-compiled backup copies can silently preserve superseded security-sensitive code.
           mapfile -t shadow_sources < <(
             git ls-files \
               'src-tauri/src/*_fixed.rs' \
