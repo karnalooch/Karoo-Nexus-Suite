@@ -40,8 +40,6 @@ jobs:
           npm run build
 
           python - <<'PY'
-          import base64
-          import gzip
           import json
           from pathlib import Path
 
@@ -71,7 +69,6 @@ jobs:
           }
 
           raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-          encoded = base64.b64encode(gzip.compress(raw, compresslevel=9)).decode()
-          print(f"MANIFEST_PATCH_GZ_B64={encoded}")
+          print(f"MANIFEST_PATCH_HEX={raw.hex()}")
           print(f"PATCH_STATS removed={len(removed)} changed={len(changed)} bytes={len(raw)}")
           PY
