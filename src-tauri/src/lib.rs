@@ -126,6 +126,59 @@ fn validate_download_url(raw: &str) -> Result<reqwest::Url, String> {
     validate_https_url(raw, DOWNLOAD_HOST_SUFFIXES)
 }
 
+const OTA_LOG_HOST_SUFFIXES: &[&str] = &[
+    "hammerhead.io",
+    "amazonaws.com",
+    "cloudfront.net",
+];
+
+fn extract_ota_urls(logcat: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut urls = Vec::new();
+
+    for line in logcat.lines() {
+        let line_lower = line.to_ascii_lowercase();
+        let mut rest = line;
+
+        while let Some(start) = rest.find("https://") {
+            let candidate = &rest[start..];
+            let end = candidate
+                .find(|ch: char| {
+                    ch.is_whitespace()
+                        || matches!(ch, '"' | '\'' | '<' | '>' | ')' | ']' | '}')
+                })
+                .unwrap_or(candidate.len());
+
+            let raw = candidate[..end].trim_end_matches([',', ';', '.']);
+            if let Ok(url) = validate_https_url(raw, OTA_LOG_HOST_SUFFIXES) {
+                let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+                let path = url.path().to_ascii_lowercase();
+                let context_is_ota = line_lower.contains("ota")
+                    || line_lower.contains("update")
+                    || line_lower.contains("hammerhead");
+                let url_looks_like_payload = path.ends_with(".zip")
+                    || path.contains("/ota/")
+                    || path.contains("/update");
+
+                if (host_matches_suffix(&host, "hammerhead.io")
+                    || context_is_ota
+                    || url_looks_like_payload)
+                    && seen.insert(url.as_str().to_string())
+                {
+                    urls.push(url.as_str().to_string());
+                }
+            }
+
+            if end >= candidate.len() {
+                break;
+            }
+            rest = &candidate[end..];
+        }
+    }
+
+    urls
+}
+
 fn validate_download_filename(file_name: &str) -> Result<(), String> {
     let trimmed = file_name.trim();
 
@@ -292,6 +345,47 @@ pub(crate) fn log_adb(app: &tauri::AppHandle, args: &[&str]) {
 #[tauri::command]
 async fn log_interaction(app: tauri::AppHandle, action: String) {
     log_to_nexus(&app, format!("USER :: {}", action));
+}
+
+#[tauri::command]
+async fn capture_ota_logcat(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    log_interaction(app.clone(), "Scanning logcat for OTA update links".to_string()).await;
+
+    let args = ["logcat", "-d"];
+    log_adb(&app, &args);
+    let output = app
+        .shell()
+        .command(adb_path())
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "ADB logcat capture failed".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let links = extract_ota_urls(&stdout);
+
+    if links.is_empty() {
+        log_to_nexus(
+            &app,
+            "SYSTEM :: No approved OTA links detected in current logcat dump".to_string(),
+        );
+    } else {
+        log_to_nexus(
+            &app,
+            format!("SYSTEM :: Detected {} approved OTA link(s)", links.len()),
+        );
+    }
+
+    Ok(links)
 }
 
 #[tauri::command]
@@ -848,6 +942,41 @@ mod security_tests {
     use super::*;
 
     #[test]
+    fn ota_logcat_extracts_only_approved_https_urls() {
+        let log = r#"
+I/Updater: OTA url=https://api.hammerhead.io/v1/device/update?deviceid=abc
+I/Updater: payload https://bucket.s3.us-east-1.amazonaws.com/ota/update.zip?sig=secret,
+I/Noise: http://api.hammerhead.io/insecure
+I/Noise: https://api.hammerhead.io.evil.example/update.zip
+I/Noise: https://example.com/update.zip
+"#;
+
+        let urls = extract_ota_urls(log);
+        assert_eq!(urls.len(), 2);
+        assert!(urls.iter().any(|url| url.starts_with(
+            "https://api.hammerhead.io/v1/device/update?deviceid=abc"
+        )));
+        assert!(urls.iter().any(|url| url.contains(
+            "s3.us-east-1.amazonaws.com/ota/update.zip?sig=secret"
+        )));
+    }
+
+    #[test]
+    fn ota_logcat_deduplicates_urls_and_ignores_unrelated_cloud_urls() {
+        let log = r#"
+I/Updater: https://downloads.hammerhead.io/ota/update.zip
+I/Updater: https://downloads.hammerhead.io/ota/update.zip
+I/Noise: https://assets.cloudfront.net/image.png
+"#;
+
+        let urls = extract_ota_urls(log);
+        assert_eq!(
+            urls,
+            vec!["https://downloads.hammerhead.io/ota/update.zip".to_string()]
+        );
+    }
+
+    #[test]
     fn ota_metadata_url_is_pinned_to_hammerhead_api() {
         assert!(validate_ota_metadata_url(
             "https://api.hammerhead.io/v1/device/update?deviceid=test"
@@ -988,6 +1117,7 @@ pub fn run() {
             stage_local_apk,
             install_package,
             log_interaction,
+            capture_ota_logcat,
             fetch_ota_metadata,
             get_github_release_apk,
             download_firmware,
