@@ -1,0 +1,77 @@
+name: One-shot manifest patch
+
+on:
+  push:
+    branches:
+      - chore/platform-engineering-baseline
+    paths:
+      - ".github/workflows/manifest-patch.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: chore/platform-engineering-baseline
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Generate compact manifest patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp package-lock.json /tmp/package-lock.before.json
+
+          npm install next@16.3.3 eslint-config-next@16.3.3 --save-exact
+          npm audit fix --package-lock-only
+          npm audit --audit-level=high
+          npm run lint
+          npm run build
+
+          python - <<'PY'
+          import base64
+          import gzip
+          import json
+          from pathlib import Path
+
+          before = json.loads(Path("/tmp/package-lock.before.json").read_text())
+          after = json.loads(Path("package-lock.json").read_text())
+          package_json = json.loads(Path("package.json").read_text())
+
+          before_packages = before.get("packages", {})
+          after_packages = after.get("packages", {})
+
+          removed = sorted(set(before_packages) - set(after_packages))
+          changed = {
+              key: after_packages[key]
+              for key in sorted(after_packages)
+              if key not in before_packages or before_packages[key] != after_packages[key]
+          }
+
+          payload = {
+              "package_json": package_json,
+              "lock_root": {
+                  key: value
+                  for key, value in after.items()
+                  if key != "packages"
+              },
+              "removed_packages": removed,
+              "changed_packages": changed,
+          }
+
+          raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+          encoded = base64.b64encode(gzip.compress(raw, compresslevel=9)).decode()
+          print(f"MANIFEST_PATCH_GZ_B64={encoded}")
+          print(f"PATCH_STATS removed={len(removed)} changed={len(changed)} bytes={len(raw)}")
+          PY
