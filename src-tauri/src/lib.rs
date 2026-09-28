@@ -5,7 +5,6 @@ use activity::{analyze_fit_file, sync_activities};
 use tauri::Emitter;
 use std::process::Command;
 use tauri_plugin_shell::ShellExt;
-use serde_json::json;
 use futures_util::StreamExt;
 use std::io::Write;
 use serde::{Serialize, Deserialize};
@@ -492,7 +491,7 @@ async fn rename_profile_on_device(
 }
 
 #[tauri::command]
-async fn inject_profile_config(app: tauri::AppHandle, payload: String) -> Result<String, String> {
+async fn inject_profile_config(_app: tauri::AppHandle, payload: String) -> Result<String, String> {
     Ok(format!("Payload staged: {}", payload))
 }
 
