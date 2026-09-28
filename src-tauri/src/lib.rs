@@ -6,7 +6,7 @@ use tauri::{Emitter, Manager};
 use std::process::Command;
 use tauri_plugin_shell::ShellExt;
 use futures_util::StreamExt;
-use std::io::Write;
+use std::io::{Read, Write};
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -151,6 +151,110 @@ fn validate_download_filename(file_name: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn validate_apk_filename(file_name: &str) -> Result<(), String> {
+    validate_download_filename(file_name)?;
+    let extension = std::path::Path::new(file_name.trim())
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "APK filename must have an extension".to_string())?;
+
+    if extension != "apk" {
+        return Err("Only .apk package files are allowed".to_string());
+    }
+
+    Ok(())
+}
+
+fn validate_apk_file(path: &std::path::Path) -> Result<(), String> {
+    let metadata = std::fs::metadata(path).map_err(|_| "APK file does not exist".to_string())?;
+    if !metadata.is_file() {
+        return Err("APK path must point to a regular file".to_string());
+    }
+    if metadata.len() == 0 || metadata.len() > 512 * 1024 * 1024 {
+        return Err("APK file size is outside the allowed range".to_string());
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "APK filename is not valid UTF-8".to_string())?;
+    validate_apk_filename(file_name)?;
+
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut magic = [0_u8; 4];
+    file.read_exact(&mut magic)
+        .map_err(|_| "APK file is too short".to_string())?;
+    if !matches!(magic, [b'P', b'K', 3, 4] | [b'P', b'K', 5, 6] | [b'P', b'K', 7, 8]) {
+        return Err("APK file is not a ZIP container".to_string());
+    }
+
+    Ok(())
+}
+
+fn managed_app_dir(app: &tauri::AppHandle, child: &str) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join(child);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::canonicalize(&dir).map_err(|e| e.to_string())
+}
+
+fn validate_managed_apk_path(
+    app: &tauri::AppHandle,
+    raw_path: &str,
+) -> Result<std::path::PathBuf, String> {
+    let root = managed_app_dir(app, "downloads")?;
+    let candidate = std::fs::canonicalize(raw_path)
+        .map_err(|_| "Package must exist in the managed download cache".to_string())?;
+
+    if !candidate.starts_with(&root) {
+        return Err("Package is outside the managed download cache".to_string());
+    }
+
+    validate_apk_file(&candidate)?;
+    Ok(candidate)
+}
+
+fn validate_remote_apk_path(raw_path: &str) -> Result<String, String> {
+    let path = raw_path.trim();
+    const ALLOWED_ROOTS: &[&str] = &[
+        "/data/app/",
+        "/system/app/",
+        "/system/priv-app/",
+        "/system_ext/app/",
+        "/system_ext/priv-app/",
+        "/product/app/",
+        "/product/priv-app/",
+        "/vendor/app/",
+        "/vendor/priv-app/",
+        "/odm/app/",
+        "/odm/priv-app/",
+    ];
+
+    if path.is_empty()
+        || path.len() > 1024
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || !path.ends_with(".apk")
+        || !ALLOWED_ROOTS.iter().any(|root| path.starts_with(root))
+    {
+        return Err("Remote path is not an approved Android APK path".to_string());
+    }
+
+    if path
+        .split('/')
+        .skip(1)
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err("Remote APK path contains unsafe path segments".to_string());
+    }
+
+    Ok(path.to_string())
 }
 
 fn redacted_url_for_log(url: &reqwest::Url) -> String {
@@ -385,9 +489,47 @@ async fn get_karoo_info(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn stage_local_apk(app: tauri::AppHandle, source_path: String) -> Result<String, String> {
+    let source = std::fs::canonicalize(&source_path)
+        .map_err(|_| "Selected APK does not exist".to_string())?;
+    validate_apk_file(&source)?;
+
+    let downloads_dir = managed_app_dir(&app, "downloads")?;
+    let staged_name = format!("manual-{}.apk", uuid::Uuid::new_v4());
+    let destination = downloads_dir.join(staged_name);
+    std::fs::copy(&source, &destination).map_err(|e| e.to_string())?;
+    validate_apk_file(&destination)?;
+
+    let staged = std::fs::canonicalize(&destination).map_err(|e| e.to_string())?;
+    log_to_nexus(
+        &app,
+        format!(
+            "SYSTEM :: Local APK staged :: {}",
+            staged
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("manual.apk")
+        ),
+    );
+    Ok(staged.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 async fn install_package(app: tauri::AppHandle, path: String) -> Result<String, String> {
-    log_interaction(app.clone(), format!("Initiating Sideload for {}", path)).await;
-    let args = ["install", "-r", &path];
+    let package_path = validate_managed_apk_path(&app, &path)?;
+    let package_name = package_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("package.apk")
+        .to_string();
+    let package_path_string = package_path.to_string_lossy().to_string();
+
+    log_interaction(
+        app.clone(),
+        format!("Initiating managed sideload for {package_name}"),
+    )
+    .await;
+    let args = ["install", "-r", package_path_string.as_str()];
     log_adb(&app, &args[..]);
 
     let output = app.shell()
@@ -423,8 +565,28 @@ async fn list_packages(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-async fn pull_file(app: tauri::AppHandle, remote_path: String, local_path: String) -> Result<String, String> {
-    let args = ["pull", &remote_path, &local_path];
+async fn pull_file(
+    app: tauri::AppHandle,
+    remote_path: String,
+    file_name: String,
+) -> Result<String, String> {
+    let remote_path = validate_remote_apk_path(&remote_path)?;
+    validate_apk_filename(&file_name)?;
+
+    let extraction_dir = managed_app_dir(&app, "extractions")?;
+    let local_path = extraction_dir.join(file_name.trim());
+
+    if let Ok(metadata) = std::fs::symlink_metadata(&local_path) {
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            std::fs::remove_file(&local_path).map_err(|e| e.to_string())?;
+        } else {
+            return Err("Extraction destination is not a regular file".to_string());
+        }
+    }
+
+    let local_path_string = local_path.to_string_lossy().to_string();
+    let args = ["pull", remote_path.as_str(), local_path_string.as_str()];
+    log_adb(&app, &args[..]);
     let output = app.shell()
         .command(adb_path())
         .args(args)
@@ -432,11 +594,19 @@ async fn pull_file(app: tauri::AppHandle, remote_path: String, local_path: Strin
         .await
         .map_err(|e| e.to_string())?;
 
-    if output.status.success() {
-        Ok(format!("Pulled {} to {}", remote_path, local_path))
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
+
+    let pulled_path = std::fs::canonicalize(&local_path)
+        .map_err(|_| "ADB reported success but the extracted file is missing".to_string())?;
+    if !pulled_path.starts_with(&extraction_dir) {
+        let _ = std::fs::remove_file(&pulled_path);
+        return Err("ADB extraction escaped the managed directory".to_string());
+    }
+    validate_apk_file(&pulled_path)?;
+
+    Ok(pulled_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -731,6 +901,46 @@ mod security_tests {
     }
 
     #[test]
+    fn apk_filename_is_strictly_leaf_apk() {
+        for file_name in ["package.apk", "Karoo App 1.2.apk"] {
+            assert!(validate_apk_filename(file_name).is_ok(), "{file_name}");
+        }
+
+        for file_name in [
+            "../package.apk",
+            "nested/package.apk",
+            "C:\\temp\\package.apk",
+            "firmware.zip",
+            "package.apks",
+            "",
+        ] {
+            assert!(validate_apk_filename(file_name).is_err(), "{file_name}");
+        }
+    }
+
+    #[test]
+    fn adb_pull_remote_path_is_limited_to_installed_apk_partitions() {
+        for path in [
+            "/data/app/~~hash/io.example.app-hash/base.apk",
+            "/system/priv-app/Settings/Settings.apk",
+            "/product/app/Example/Example.apk",
+        ] {
+            assert!(validate_remote_apk_path(path).is_ok(), "{path}");
+        }
+
+        for path in [
+            "/sdcard/Download/private.apk",
+            "/data/local/tmp/tool.apk",
+            "/data/app/../data/local/tmp/tool.apk",
+            "/data/app/not-an-apk.db",
+            "/data/app/evil.apk\nnext",
+            "",
+        ] {
+            assert!(validate_remote_apk_path(path).is_err(), "{path}");
+        }
+    }
+
+    #[test]
     fn logged_url_drops_query_and_fragment() {
         let url = reqwest::Url::parse(
             "https://bucket.s3.amazonaws.com/update.zip?X-Amz-Signature=secret#fragment",
@@ -775,6 +985,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_adb_connection,
             get_karoo_info,
+            stage_local_apk,
             install_package,
             log_interaction,
             fetch_ota_metadata,
