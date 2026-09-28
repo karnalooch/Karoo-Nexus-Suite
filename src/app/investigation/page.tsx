@@ -5,7 +5,7 @@ import { Search, Download, Zap, Terminal, ShieldAlert, Cpu, HardDriveDownload, N
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { save } from "@tauri-apps/plugin-dialog";
 import { useNexus } from "@/context/NexusContext";
 
 import { TacticalDownloader } from "@/components/TacticalDownloader";
@@ -99,7 +99,7 @@ export default function InvestigationPage() {
   const [activeDownloadedPath, setActiveDownloadedPath] = useState<string | null>(null);
 
   // OTA Target Device
-  const [otaTarget, setOtaTarget] = useState<"karoo1" | "karoo2" | "karoo3" | "adb">("karoo1");
+  const [otaTarget, setOtaTarget] = useState<"karoo1" | "karoo2" | "karoo3">("karoo1");
   const [manualDeviceId, setManualDeviceId] = useState("");
 
   const [logs, setLogs] = useState<{id: number, msg: string, time: Date}[]>([]);
@@ -221,13 +221,6 @@ export default function InvestigationPage() {
            if (!manualDeviceId.trim()) throw new Error("Karoo 3 requires a valid Device ID.");
            deviceId = manualDeviceId.trim();
            version = "karoo-3.0.0.0";
-           break;
-        case "adb":
-           if (isOffline) throw new Error("Device offline. Cannot pull ID via ADB.");
-           const id = await invoke("get_device_id");
-           deviceId = id as string;
-           if (!deviceId) throw new Error("Received empty device ID from ADB.");
-           version = "latest";
            break;
       }
 
@@ -369,94 +362,7 @@ export default function InvestigationPage() {
     setCapturedLinks(prev => Array.from(new Set([testUrl, ...prev])));
   };
 
-  const injectCustomMap = async () => {
-    if (isOffline) return;
-    try {
-      const file = await open({
-        multiple: false,
-        title: "Select Custom Map Package (.zip / .sqlite / .map)",
-        filters: [{ name: "Map Data", extensions: ["zip", "sqlite", "map", "mbtiles"] }]
-      });
-      if (!file) return;
-      logInteraction(`INVESTIGATION :: Selected Map Package: ${file}`);
-      const res = await invoke("inject_custom_map", { localPath: file });
-      logInteraction(`INVESTIGATION :: Map Injection Result: ${res}`);
-    } catch (e) {
-      logInteraction(`INVESTIGATION :: Map Injection Failed :: ${e}`);
-    }
-  };
-
-  const sideloadCustomOta = async () => {
-    if (isOffline) return;
-    try {
-      const file = await open({
-        multiple: false,
-        title: "Select OTA Update Package (.zip)",
-        filters: [{ name: "OTA Zip", extensions: ["zip"] }]
-      });
-      if (!file) return;
-      logInteraction(`INVESTIGATION :: Selected OTA Package: ${file}`);
-      logInteraction(`INVESTIGATION :: Pushing and sideloading OTA... This may take several minutes.`);
-      const res = await invoke("sideload_custom_ota", { localPath: file });
-      logInteraction(`INVESTIGATION :: OTA Sideload Result: ${res}`);
-    } catch (e) {
-      logInteraction(`INVESTIGATION :: OTA Sideload Failed :: ${e}`);
-    }
-  };
-
-  const disarmRootDetection = async () => {
-    if (isOffline) return;
-    try {
-      logInteraction(`INVESTIGATION :: Attempting to disarm Bugsnag Root Detection & Telemetry...`);
-      const res = await invoke("disarm_root_detection");
-      logInteraction(`INVESTIGATION :: Disarm Result: ${res}`);
-    } catch (e) {
-      logInteraction(`INVESTIGATION :: Disarm Failed :: ${e}`);
-    }
-  };
-
-  const [isProxyRunning, setIsProxyRunning] = useState(false);
-
-  const startMapProxy = async () => {
-    if (isOffline) return;
-    try {
-      const file = await open({
-        multiple: false,
-        title: "Select Tactical Map Payload (.zip / .mbtiles)",
-        filters: [{ name: "Map Data", extensions: ["zip", "mbtiles"] }]
-      });
-      if (!file) return;
-      logInteraction(`INVESTIGATION :: Starting Proxy for Map: ${file}`);
-      const res = await invoke("start_map_proxy", { localPath: file });
-      logInteraction(`INVESTIGATION :: Proxy Started :: ${res}`);
-      setIsProxyRunning(true);
-    } catch (e) {
-      logInteraction(`INVESTIGATION :: Proxy Start Failed :: ${e}`);
-    }
-  };
-
-  const stopMapProxy = async () => {
-    if (isOffline) return;
-    try {
-      logInteraction(`INVESTIGATION :: Stopping Proxy...`);
-      const res = await invoke("stop_map_proxy");
-      logInteraction(`INVESTIGATION :: Proxy Stopped :: ${res}`);
-      setIsProxyRunning(false);
-    } catch (e) {
-      logInteraction(`INVESTIGATION :: Proxy Stop Failed :: ${e}`);
-    }
-  };
-
-  const generateCaCert = async () => {
-    if (isOffline) return;
-    try {
-      logInteraction(`INVESTIGATION :: Generating and pushing CA Certificate...`);
-      const res = await invoke("generate_ca_cert");
-      logInteraction(`INVESTIGATION :: CA Cert Generation Result: ${res}`);
-    } catch (e) {
-      logInteraction(`INVESTIGATION :: CA Cert Generation Failed :: ${e}`);
-    }
-  };
+  const isProxyRunning = false;
 
   const handleUnlock = (e: React.FormEvent) => {
     e.preventDefault();
@@ -700,12 +606,12 @@ export default function InvestigationPage() {
                    <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
                 </button>
 
-                <button onClick={disarmRootDetection} disabled={isOffline} className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
+                <button disabled title="Deferred until a safe backend trust boundary is implemented" className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
                    <div className="flex items-center gap-3 text-left">
                       <ShieldCheck className="w-4 h-4 text-slate-500 group-hover:text-primary" />
                       <div>
                          <p className="text-xs font-bold text-foreground">Disarm Root Detection</p>
-                         <p className="text-[9px] text-slate-500">Disable Bugsnag telemetry</p>
+                         <p className="text-[9px] text-slate-500">Deferred — no safe backend contract</p>
                       </div>
                    </div>
                    <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
@@ -733,7 +639,6 @@ export default function InvestigationPage() {
                 <option value="karoo1">Target: Karoo 1 (Gen 1)</option>
                 <option value="karoo2">Target: Karoo 2 (Gen 2)</option>
                 <option value="karoo3">Target: Karoo 3 (Gen 3)</option>
-                <option value="adb">Target: Connected Device (via ADB)</option>
               </select>
 
               <div className="text-[10px] text-slate-500 font-medium px-1 flex justify-between">
@@ -756,7 +661,6 @@ export default function InvestigationPage() {
 
               <button 
                 onClick={checkLatestFirmware}
-                disabled={isOffline && otaTarget === "adb"}
                 className="w-full py-4 bg-primary text-white text-sm font-bold tracking-wide rounded-md hover:opacity-90 transition-all shadow-lg shadow-primary/20 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Zap className="w-4 h-4 fill-white" />
@@ -776,12 +680,12 @@ export default function InvestigationPage() {
                    <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
                 </button>
 
-                <button onClick={sideloadCustomOta} disabled={isOffline} className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
+                <button disabled title="Deferred until OTA package validation and recovery are implemented" className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
                    <div className="flex items-center gap-3 text-left">
                       <HardDriveDownload className="w-4 h-4 text-slate-500 group-hover:text-primary" />
                       <div>
                          <p className="text-xs font-bold text-foreground">Sideload Custom OTA</p>
-                         <p className="text-[9px] text-slate-500">Push & install local .zip via Intent</p>
+                         <p className="text-[9px] text-slate-500">Deferred — validation/recovery required</p>
                       </div>
                    </div>
                    <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
@@ -845,12 +749,12 @@ export default function InvestigationPage() {
             </div>
             
             <div className="space-y-2">
-                <button onClick={injectCustomMap} disabled={isOffline} className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
+                <button disabled title="Deferred until map injection has a validated backend contract" className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
                    <div className="flex items-center gap-3 text-left">
                       <Map className="w-4 h-4 text-slate-500 group-hover:text-primary" />
                       <div>
                          <p className="text-xs font-bold text-foreground">Custom Map Injector</p>
-                         <p className="text-[9px] text-slate-500">SQLite Patcher (Root Req)</p>
+                         <p className="text-[9px] text-slate-500">Deferred — backend contract required</p>
                       </div>
                    </div>
                    <Zap className="w-3.5 h-3.5 text-slate-400 opacity-0 group-hover:opacity-100 transition-all" />
@@ -869,17 +773,17 @@ export default function InvestigationPage() {
 
                 <div className="flex gap-3">
                     {!isProxyRunning ? (
-                      <button onClick={startMapProxy} disabled={isOffline} className="flex-1 flex items-center justify-center gap-2 py-3 bg-primary text-white text-xs font-bold rounded-md hover:opacity-90 transition-all disabled:opacity-50 shadow-md shadow-primary/20">
-                        <Map className="w-4 h-4" /> Start Proxy
+                      <button disabled title="Deferred until the proxy server and cleanup contract are implemented" className="flex-1 flex items-center justify-center gap-2 py-3 bg-primary text-white text-xs font-bold rounded-md hover:opacity-90 transition-all disabled:opacity-50 shadow-md shadow-primary/20">
+                        <Map className="w-4 h-4" /> Proxy Deferred
                       </button>
                     ) : (
-                      <button onClick={stopMapProxy} disabled={isOffline} className="flex-1 flex items-center justify-center gap-2 py-3 bg-red-500 text-white text-xs font-bold rounded-md hover:bg-red-600 transition-all shadow-md shadow-red-500/20">
-                        <ShieldAlert className="w-4 h-4" /> Stop Proxy
+                      <button disabled title="Deferred until the proxy server and cleanup contract are implemented" className="flex-1 flex items-center justify-center gap-2 py-3 bg-red-500 text-white text-xs font-bold rounded-md hover:bg-red-600 transition-all shadow-md shadow-red-500/20">
+                        <ShieldAlert className="w-4 h-4" /> Proxy Deferred
                       </button>
                     )}
                 </div>
 
-                <button onClick={generateCaCert} disabled={isOffline} className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
+                <button disabled title="Deferred until certificate lifecycle and device installation are implemented" className="w-full flex items-center justify-between p-3 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-all group disabled:opacity-50">
                    <div className="flex items-center gap-3 text-left">
                       <ShieldCheck className="w-4 h-4 text-slate-500 group-hover:text-primary" />
                       <div>
