@@ -663,6 +663,172 @@ fn stage_and_pull_profile_db(
 }
 
 
+fn validate_profile_rename(old_name: &str, new_name: &str) -> Result<(), String> {
+    for (label, value) in [("current", old_name), ("new", new_name)] {
+        if value.trim().is_empty()
+            || value.len() > 128
+            || value.chars().any(char::is_control)
+        {
+            return Err(format!("The {label} profile name is invalid"));
+        }
+    }
+
+    if new_name.len() > old_name.len() {
+        return Err(
+            "The new profile name is longer than the current encoded slot; choose a shorter name"
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn sqlite_integrity_check(conn: &rusqlite::Connection) -> Result<(), String> {
+    let result: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if result != "ok" {
+        return Err(format!("SQLite integrity check failed: {result}"));
+    }
+    Ok(())
+}
+
+fn profile_blob_matches(
+    conn: &rusqlite::Connection,
+    needle: &[u8],
+) -> Result<Vec<(String, i64, Vec<u8>)>, String> {
+    let mut tables = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'kv_%'")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for table in rows {
+            tables.push(table.map_err(|e| e.to_string())?);
+        }
+    }
+
+    let mut matches = Vec::new();
+    for table in tables {
+        let quoted = table.replace('"', "\"\"");
+        let query = format!(
+            "SELECT rowid, body FROM \"{quoted}\" WHERE key LIKE '%ride_profile%'"
+        );
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+
+        for row in rows {
+            let (rowid, body) = row.map_err(|e| e.to_string())?;
+            let occurrences = body.windows(needle.len()).filter(|window| *window == needle).count();
+            for _ in 0..occurrences {
+                matches.push((table.clone(), rowid, body.clone()));
+            }
+        }
+    }
+
+    Ok(matches)
+}
+
+fn patch_profile_database(
+    local_path: &std::path::Path,
+    old_name: &str,
+    new_name: &str,
+) -> Result<(), String> {
+    validate_profile_rename(old_name, new_name)?;
+
+    let mut conn = rusqlite::Connection::open(local_path).map_err(|e| e.to_string())?;
+    sqlite_integrity_check(&conn)?;
+
+    let old_bytes = old_name.as_bytes();
+    let matches = profile_blob_matches(&conn, old_bytes)?;
+    if matches.is_empty() {
+        return Err(format!("Could not find '{old_name}' in a ride profile record"));
+    }
+    if matches.len() != 1 {
+        return Err(format!(
+            "Refusing ambiguous rename: found {} matching profile payloads",
+            matches.len()
+        ));
+    }
+
+    let (table, rowid, mut body) = matches.into_iter().next().unwrap();
+    let position = body
+        .windows(old_bytes.len())
+        .position(|window| window == old_bytes)
+        .ok_or_else(|| "Profile payload changed while preparing the update".to_string())?;
+
+    let mut replacement = new_name.as_bytes().to_vec();
+    replacement.resize(old_bytes.len(), b' ');
+    body[position..position + old_bytes.len()].copy_from_slice(&replacement);
+
+    let quoted = table.replace('"', "\"\"");
+    {
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            &format!("UPDATE \"{quoted}\" SET body = ?1 WHERE rowid = ?2"),
+            rusqlite::params![body, rowid],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|e| e.to_string())?;
+    sqlite_integrity_check(&conn)
+}
+
+fn profile_database_contains_name(
+    local_path: &std::path::Path,
+    name: &str,
+) -> Result<bool, String> {
+    let conn = rusqlite::Connection::open(local_path).map_err(|e| e.to_string())?;
+    sqlite_integrity_check(&conn)?;
+    Ok(!profile_blob_matches(&conn, name.as_bytes())?.is_empty())
+}
+
+fn root_file_exists(adb: &str, path: &str) -> Result<bool, String> {
+    let output = run_root_checked(
+        adb,
+        &format!("if [ -f {path} ]; then echo yes; else echo no; fi"),
+    )?;
+    Ok(output.trim() == "yes")
+}
+
+fn parse_device_file_metadata(raw: &str) -> Result<(String, String, String), String> {
+    let parts: Vec<&str> = raw.trim().split(':').collect();
+    if parts.len() != 3 || parts.iter().any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit())) {
+        return Err("Could not determine database ownership/mode".to_string());
+    }
+    Ok((
+        parts[0].to_string(),
+        parts[1].to_string(),
+        parts[2].to_string(),
+    ))
+}
+
+struct DataSyncServiceGuard {
+    adb: String,
+}
+
+impl Drop for DataSyncServiceGuard {
+    fn drop(&mut self) {
+        let _ = Command::new(&self.adb)
+            .args([
+                "shell",
+                "am",
+                "startservice",
+                "io.hammerhead.datasyncservice/.DataSyncService",
+            ])
+            .output();
+    }
+}
+
 fn redacted_url_for_log(url: &reqwest::Url) -> String {
     let mut redacted = url.clone();
     redacted.set_query(None);
@@ -1415,53 +1581,125 @@ async fn rename_profile_on_device(
     old_name: String,
     new_name: String,
 ) -> Result<String, String> {
-    let mtk_su = "/data/local/tmp/mtk-su";
+    let db_path = validate_profile_db_path(&db_path)?;
+    validate_profile_rename(&old_name, &new_name)?;
+
     let adb = adb_path();
-    
-    let local_db_name = format!("patch_{}.sqlite3", uuid::Uuid::new_v4());
-    let temp_dir = std::path::PathBuf::from("scratch/temp_dbs");
-    let _ = std::fs::create_dir_all(&temp_dir);
-    let local_path = temp_dir.join(&local_db_name);
-    let sd_path = format!("/sdcard/{}", local_db_name);
+    let surgery_id = uuid::Uuid::new_v4().to_string();
+    let local_dir = managed_app_dir(&app, "profile-surgery")?;
+    let local_db = local_dir.join(format!("{surgery_id}.sqlite3"));
+    let local_wal = local_dir.join(format!("{surgery_id}.sqlite3-wal"));
+    let local_shm = local_dir.join(format!("{surgery_id}.sqlite3-shm"));
+    let local_verify = local_dir.join(format!("{surgery_id}-verify.sqlite3"));
 
-    log_to_nexus(&app, format!("SURGERY :: Renaming '{}' -> '{}' in {}", old_name, new_name, db_path));
+    let sd_db = format!("/sdcard/nexus-{surgery_id}.sqlite3");
+    let sd_wal = format!("{sd_db}-wal");
+    let sd_shm = format!("{sd_db}-shm");
+    let sd_patched = format!("/sdcard/nexus-{surgery_id}-patched.sqlite3");
+    let sd_verify = format!("/sdcard/nexus-{surgery_id}-verify.sqlite3");
 
-    let _ = Command::new(&adb).args(["shell", "am", "force-stop", "io.hammerhead.datasyncservice"]).output();
-    let _ = Command::new(&adb).args(["shell", mtk_su, "-c", &format!("cp {} {}; chmod 777 {}", db_path, sd_path, sd_path)]).output();
-    let _ = Command::new(&adb).args(["pull", &sd_path, local_path.to_str().unwrap()]).output();
+    let backup_db = format!("{db_path}.nexus-backup-{surgery_id}");
+    let backup_wal = format!("{backup_db}-wal");
+    let backup_shm = format!("{backup_db}-shm");
 
-    let mut data = std::fs::read(&local_path).map_err(|e| e.to_string())?;
-    let old_bytes = old_name.as_bytes();
-    let mut new_bytes = new_name.as_bytes().to_vec();
+    log_to_nexus(
+        &app,
+        format!("SURGERY :: Preparing recoverable rename '{}' -> '{}'", old_name, new_name),
+    );
 
-    if new_bytes.len() < old_bytes.len() {
-        new_bytes.extend(vec![b' '; old_bytes.len() - new_bytes.len()]);
-    } else if new_bytes.len() > old_bytes.len() {
-        new_bytes.truncate(old_bytes.len());
+    run_adb_checked(
+        &adb,
+        &["shell", "am", "force-stop", "io.hammerhead.datasyncservice"],
+    )?;
+    let _service_guard = DataSyncServiceGuard { adb: adb.clone() };
+
+    let metadata_raw = run_root_checked(&adb, &format!("stat -c '%u:%g:%a' {db_path}"))?;
+    let (uid, gid, mode) = parse_device_file_metadata(&metadata_raw)?;
+
+    let stage_command = format!(
+        "cp {db_path} {sd_db}; chmod 666 {sd_db};          if [ -f {db_path}-wal ]; then cp {db_path}-wal {sd_wal}; chmod 666 {sd_wal}; fi;          if [ -f {db_path}-shm ]; then cp {db_path}-shm {sd_shm}; chmod 666 {sd_shm}; fi"
+    );
+    run_root_checked(&adb, &stage_command)?;
+
+    let local_db_string = local_db.to_string_lossy().to_string();
+    run_adb_checked(&adb, &["pull", sd_db.as_str(), local_db_string.as_str()])?;
+
+    if root_file_exists(&adb, &sd_wal)? {
+        let local_wal_string = local_wal.to_string_lossy().to_string();
+        run_adb_checked(&adb, &["pull", sd_wal.as_str(), local_wal_string.as_str()])?;
+    }
+    if root_file_exists(&adb, &sd_shm)? {
+        let local_shm_string = local_shm.to_string_lossy().to_string();
+        run_adb_checked(&adb, &["pull", sd_shm.as_str(), local_shm_string.as_str()])?;
     }
 
-    let mut found = false;
-    for i in 0..data.len().saturating_sub(old_bytes.len()) {
-        if &data[i..i + old_bytes.len()] == old_bytes {
-            data[i..i + old_bytes.len()].copy_from_slice(&new_bytes);
-            found = true;
-            break;
+    patch_profile_database(&local_db, &old_name, &new_name)?;
+
+    let local_db_string = local_db.to_string_lossy().to_string();
+    run_adb_checked(
+        &adb,
+        &["push", local_db_string.as_str(), sd_patched.as_str()],
+    )?;
+
+    let backup_command = format!(
+        "cp {db_path} {backup_db};          if [ -f {db_path}-wal ]; then cp {db_path}-wal {backup_wal}; fi;          if [ -f {db_path}-shm ]; then cp {db_path}-shm {backup_shm}; fi"
+    );
+    run_root_checked(&adb, &backup_command)?;
+
+    let install_command = format!(
+        "cp {sd_patched} {db_path};          rm -f {db_path}-wal {db_path}-shm;          chown {uid}:{gid} {db_path}; chmod {mode} {db_path}"
+    );
+
+    if let Err(error) = run_root_checked(&adb, &install_command) {
+        let rollback = format!(
+            "cp {backup_db} {db_path};              if [ -f {backup_wal} ]; then cp {backup_wal} {db_path}-wal; else rm -f {db_path}-wal; fi;              if [ -f {backup_shm} ]; then cp {backup_shm} {db_path}-shm; else rm -f {db_path}-shm; fi;              chown {uid}:{gid} {db_path}; chmod {mode} {db_path};              if [ -f {db_path}-wal ]; then chown {uid}:{gid} {db_path}-wal; chmod 660 {db_path}-wal; fi;              if [ -f {db_path}-shm ]; then chown {uid}:{gid} {db_path}-shm; chmod 660 {db_path}-shm; fi"
+        );
+        let _ = run_root_checked(&adb, &rollback);
+        return Err(format!("Profile replacement failed and rollback was attempted: {error}"));
+    }
+
+    let verify_stage = format!("cp {db_path} {sd_verify}; chmod 666 {sd_verify}");
+    let verification_result = (|| -> Result<(), String> {
+        run_root_checked(&adb, &verify_stage)?;
+        let local_verify_string = local_verify.to_string_lossy().to_string();
+        run_adb_checked(
+            &adb,
+            &["pull", sd_verify.as_str(), local_verify_string.as_str()],
+        )?;
+        if !profile_database_contains_name(&local_verify, &new_name)? {
+            return Err("Verified database does not contain the new profile name".to_string());
         }
+        Ok(())
+    })();
+
+    if let Err(error) = verification_result {
+        let rollback = format!(
+            "cp {backup_db} {db_path};              if [ -f {backup_wal} ]; then cp {backup_wal} {db_path}-wal; else rm -f {db_path}-wal; fi;              if [ -f {backup_shm} ]; then cp {backup_shm} {db_path}-shm; else rm -f {db_path}-shm; fi;              chown {uid}:{gid} {db_path}; chmod {mode} {db_path};              if [ -f {db_path}-wal ]; then chown {uid}:{gid} {db_path}-wal; chmod 660 {db_path}-wal; fi;              if [ -f {db_path}-shm ]; then chown {uid}:{gid} {db_path}-shm; chmod 660 {db_path}-shm; fi"
+        );
+        let rollback_result = run_root_checked(&adb, &rollback);
+        return Err(match rollback_result {
+            Ok(_) => format!("Verification failed; original database restored: {error}"),
+            Err(rollback_error) => format!(
+                "CRITICAL: verification failed and rollback also failed: {error}; rollback: {rollback_error}"
+            ),
+        });
     }
 
-    if !found {
-        let _ = Command::new(&adb).args(["shell", "am", "startservice", "io.hammerhead.datasyncservice/.DataSyncService"]).output();
-        return Err(format!("Could not find '{}' in database", old_name));
-    }
+    let cleanup_command = format!("rm -f {sd_db} {sd_wal} {sd_shm} {sd_patched} {sd_verify}");
+    let _ = run_root_checked(&adb, &cleanup_command);
+    let _ = std::fs::remove_file(&local_db);
+    let _ = std::fs::remove_file(&local_wal);
+    let _ = std::fs::remove_file(&local_shm);
+    let _ = std::fs::remove_file(&local_verify);
 
-    std::fs::write(&local_path, data).map_err(|e| e.to_string())?;
-    let _ = Command::new(&adb).args(["push", local_path.to_str().unwrap(), &sd_path]).output();
-    let inject_cmd = format!("cp {} {}; chmod 660 {}; chown 1000:1000 {}; rm {}", sd_path, db_path, db_path, db_path, sd_path);
-    let _ = Command::new(&adb).args(["shell", mtk_su, "-c", &inject_cmd]).output();
-    let _ = Command::new(&adb).args(["shell", "am", "startservice", "io.hammerhead.datasyncservice/.DataSyncService"]).output();
-
-    log_to_nexus(&app, "SURGERY :: Success.".to_string());
-    Ok(format!("Renamed to '{}'", new_name))
+    log_to_nexus(
+        &app,
+        format!("SURGERY :: Verified success; recovery backup retained at {backup_db}"),
+    );
+    Ok(format!(
+        "Renamed to '{}'. Recovery backup retained at {}",
+        new_name, backup_db
+    ))
 }
 
 #[cfg(test)]
@@ -1896,6 +2134,50 @@ I/Noise: https://assets.cloudfront.net/image.png
             "List of devices attached\nmalformed-device-row\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn profile_rename_rejects_length_expansion_and_controls() {
+        assert!(validate_profile_rename("Tempo Ride", "Tempo").is_ok());
+        assert!(validate_profile_rename("Short", "Longer Name").is_err());
+        assert!(validate_profile_rename("Tempo", "Bad\nName").is_err());
+    }
+
+    #[test]
+    fn profile_database_patch_uses_sqlite_and_preserves_integrity() {
+        let path = std::env::temp_dir().join(format!(
+            "karoo-nexus-profile-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "CREATE TABLE kv_profiles (key TEXT NOT NULL, body BLOB NOT NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kv_profiles (key, body) VALUES (?1, ?2)",
+                rusqlite::params![
+                    "profile.ride_profile.1",
+                    b"prefixTempo Ridesuffix".to_vec()
+                ],
+            )
+            .unwrap();
+        }
+
+        patch_profile_database(&path, "Tempo Ride", "Tempo").unwrap();
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        sqlite_integrity_check(&conn).unwrap();
+        let body: Vec<u8> = conn
+            .query_row("SELECT body FROM kv_profiles LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert!(body
+            .windows(b"Tempo     ".len())
+            .any(|window| window == b"Tempo     "));
+        drop(conn);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
