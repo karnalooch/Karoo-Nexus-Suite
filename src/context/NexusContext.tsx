@@ -17,6 +17,13 @@ type DiscoveryProgress = {
   total: number;
 };
 
+type AdbConnectionState = {
+  status: "Online" | "Disconnected" | "Ambiguous";
+  serial: string | null;
+  transport_count: number;
+  authorized_count: number;
+};
+
 interface NexusContextType {
   adbStatus: string;
   deviceInfo: string | null;
@@ -73,6 +80,10 @@ export function NexusProvider({ children }: { children: ReactNode }) {
 
   const applyChangesToDevice = async () => {
     if (pendingChanges.size === 0) return;
+    if (adbStatus !== "Online") {
+      addLog(`-- BLOCKED :: ADB session is ${adbStatus}; connect exactly one authorized device.`);
+      return;
+    }
 
     setIsApplying(true);
     addLog("-- INITIALIZING SURGERY BATCH --");
@@ -196,15 +207,14 @@ export function NexusProvider({ children }: { children: ReactNode }) {
 
     const checkConnection = async () => {
       try {
-        const devices = await invoke("check_adb_connection") as string;
-        const isOnline = devices.includes("\tdevice");
+        const session = await invoke<AdbConnectionState>("check_adb_connection");
 
-        if (isOnline) {
+        if (session.status === "Online") {
           if (currentStatus !== "Online") {
             currentStatus = "Online";
             setAdbStatus("Online");
             setLogs(prev => prev.filter(l => !l.includes("Awaiting Device Pulse...")));
-            addLog("Device Detected: HH-KAROO-X — Channel Open");
+            addLog(`Device Detected: ${session.serial ?? "Karoo"} — Channel Open`);
             
             try {
               const info = await invoke("get_karoo_info") as string;
@@ -218,11 +228,22 @@ export function NexusProvider({ children }: { children: ReactNode }) {
               fetchProfiles();
             }
           }
-        } else {
-          if (currentStatus !== "Disconnected") {
-            currentStatus = "Disconnected";
-            setAdbStatus("Disconnected");
+        } else if (session.status === "Ambiguous") {
+          if (currentStatus !== "Ambiguous") {
+            currentStatus = "Ambiguous";
+            setAdbStatus("Ambiguous");
             setDeviceInfo(null);
+            addLog(
+              `Warning: Multiple ADB transports detected (${session.transport_count}) — device workflows blocked`
+            );
+          }
+        } else if (currentStatus !== "Disconnected") {
+          currentStatus = "Disconnected";
+          setAdbStatus("Disconnected");
+          setDeviceInfo(null);
+          if (session.transport_count > 0) {
+            addLog("Warning: ADB device present but unavailable or unauthorized");
+          } else {
             addLog("Warning: Neural Link Severed — Device Absent");
           }
         }

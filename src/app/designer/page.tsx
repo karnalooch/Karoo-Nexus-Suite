@@ -265,7 +265,7 @@ export default function DesignerPage() {
                  <div className="grid grid-cols-2 gap-2 mt-4">
                     <button 
                        onClick={fetchProfiles}
-                       disabled={isPulling || !!discoveryProgress}
+                       disabled={isPulling || !!discoveryProgress || adbStatus !== "Online"}
                        className="py-2.5 bg-secondary hover:bg-zinc-800 border border-white/10 rounded-lg text-[10px] font-bold text-slate-400 flex items-center justify-center gap-2 transition-all"
                     >
                       <RefreshCw className={`w-3 h-3 ${!!discoveryProgress ? 'animate-spin text-primary' : ''}`} />
@@ -274,7 +274,7 @@ export default function DesignerPage() {
                     
                     <button 
                        onClick={applyChangesToDevice}
-                       disabled={pendingChanges.size === 0 || isApplying}
+                       disabled={pendingChanges.size === 0 || isApplying || adbStatus !== "Online"}
                        className={`py-2.5 rounded-lg text-[10px] font-bold flex items-center justify-center gap-2 transition-all border ${pendingChanges.size > 0 ? 'bg-amber-500/20 text-amber-500 border-amber-500/50 hover:bg-amber-500/30' : 'bg-secondary text-slate-600 border-white/5 opacity-50'}`}
                     >
                       <Save className={`w-3 h-3 ${isApplying ? 'animate-bounce' : ''}`} />
@@ -371,7 +371,7 @@ export default function DesignerPage() {
                </button>
             </div>
                {adbStatus !== "Online" && (
-                 <p className="text-[10px] text-center text-red-400 mt-3 font-medium uppercase tracking-tighter">Device Offline — Connect via ADB</p>
+                 <p className="text-[10px] text-center text-red-400 mt-3 font-medium uppercase tracking-tighter">{adbStatus === "Ambiguous" ? "Multiple ADB Devices — Disconnect Extras" : "Device Offline — Connect via ADB"}</p>
                )}
         </div>
       </div>
