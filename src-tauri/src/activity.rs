@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::path::PathBuf;
-use fitparser;
 use serde::Serialize;
 use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
@@ -28,7 +27,7 @@ pub async fn sync_activities(app: tauri::AppHandle) -> Result<String, String> {
     log_adb(&app, &args);
 
     let output = app.shell()
-        .command(&adb_path())
+        .command(adb_path())
         .args(args)
         .output()
         .await
