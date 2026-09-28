@@ -10,6 +10,7 @@ Current required lanes include:
 
 - repository policy
 - governance guard
+- fail-fast private-key guard
 - frontend lint and production build when relevant
 - Rust `cargo check --locked` when relevant
 - npm audit for dependency-sensitive changes
@@ -27,17 +28,10 @@ The GitHub App used by automation does not have repository administration scope,
 
 Once Dependency graph is enabled, re-enable the reusable Dependency Review lane in `.github/workflows/baseline.yml`.
 
-## Credential incident
+## Secret-handling contract
 
-A CloudFront private key was found embedded in the public source tree and has been removed from the current code.
-
-Deleting a credential from the latest tree does not revoke it and does not remove it from Git history.
-
-Required incident response:
-
-1. Revoke or rotate the exposed credential if it is controlled by this project.
-2. If it belongs to a third party, do not use it and notify the owner through an appropriate security channel.
-3. Treat all prior copies of the credential as compromised.
-4. Keep the client-side CloudFront signing path disabled; private signing material must not be shipped in a browser/Tauri frontend bundle.
-
-Trivy secret scanning remains a blocking CI gate for the current tree.
+- Private keys, signing keys and secret-container files must not be committed.
+- Private signing material must never be shipped in a browser or Tauri frontend bundle.
+- Secrets must be injected only through an appropriate trusted runtime or build-time secret boundary.
+- A deleted secret must still be treated as compromised if it ever appeared in repository history.
+- Trivy secret scanning and the local private-key guard remain blocking CI gates for the current tree.
