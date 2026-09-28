@@ -13,13 +13,6 @@ RUST_LIB = ROOT / "src-tauri" / "src" / "lib.rs"
 # Existing Investigation controls that predate this contract. Keep this list shrinking:
 # implementing or removing one of these commands must remove it from this allowlist.
 LEGACY_MISSING = {
-    "disarm_root_detection",
-    "generate_ca_cert",
-    "get_device_id",
-    "inject_custom_map",
-    "sideload_custom_ota",
-    "start_map_proxy",
-    "stop_map_proxy",
 }
 
 INVOKE = re.compile(
