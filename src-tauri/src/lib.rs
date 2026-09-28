@@ -352,6 +352,30 @@ fn root_identity_is_uid_zero(identity: &str) -> bool {
         .any(|token| token == "uid=0" || token.starts_with("uid=0("))
 }
 
+fn require_non_empty_adb_value(step: &str, value: String) -> Result<String, String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        Err(format!("{step} returned an empty value"))
+    } else {
+        Ok(value)
+    }
+}
+
+fn parse_package_listing(raw: &str) -> Result<Vec<String>, String> {
+    let packages: Vec<String> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("package:"))
+        .map(str::to_string)
+        .collect();
+
+    if packages.is_empty() {
+        Err("ADB package listing returned no package entries".to_string())
+    } else {
+        Ok(packages)
+    }
+}
+
 fn validate_remote_apk_path(raw_path: &str) -> Result<String, String> {
     let path = raw_path.trim();
     const ALLOWED_ROOTS: &[&str] = &[
@@ -641,27 +665,42 @@ fn open_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
 #[tauri::command]
 async fn check_adb_connection(app: tauri::AppHandle) -> Result<String, String> {
     let args = ["devices"];
-    let output = app.shell()
+    log_adb(&app, &args);
+    let output = app
+        .shell()
         .command(adb_path())
         .args(args)
         .output()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("ADB device discovery could not start: {e}"))?;
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    checked_adb_step(
+        "ADB device discovery",
+        output.status.success(),
+        &output.stdout,
+        &output.stderr,
+    )
 }
 
 #[tauri::command]
 async fn get_karoo_info(app: tauri::AppHandle) -> Result<String, String> {
     let args = ["shell", "getprop", "ro.build.display.id"];
-    let output = app.shell()
+    log_adb(&app, &args);
+    let output = app
+        .shell()
         .command(adb_path())
         .args(args)
         .output()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Karoo build query could not start: {e}"))?;
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let value = checked_adb_step(
+        "Karoo build query",
+        output.status.success(),
+        &output.stdout,
+        &output.stderr,
+    )?;
+    require_non_empty_adb_value("Karoo build query", value)
 }
 
 #[tauri::command]
@@ -729,15 +768,22 @@ async fn install_package(app: tauri::AppHandle, path: String) -> Result<String, 
 #[tauri::command]
 async fn list_packages(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     let args = ["shell", "pm", "list", "packages", "-f"];
-    let output = app.shell()
+    log_adb(&app, &args);
+    let output = app
+        .shell()
         .command(adb_path())
         .args(args)
         .output()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("ADB package listing could not start: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.lines().map(|s| s.to_string()).collect())
+    let stdout = checked_adb_step(
+        "ADB package listing",
+        output.status.success(),
+        &output.stdout,
+        &output.stderr,
+    )?;
+    parse_package_listing(&stdout)
 }
 
 #[tauri::command]
@@ -1182,6 +1228,24 @@ I/Noise: https://assets.cloudfront.net/image.png
         ] {
             assert!(validate_apk_filename(file_name).is_err(), "{file_name}");
         }
+    }
+
+    #[test]
+    fn adb_value_and_package_parsers_fail_closed_on_empty_or_invalid_output() {
+        assert_eq!(
+            require_non_empty_adb_value("build", "  karoo-build-1  ".to_string()).unwrap(),
+            "karoo-build-1"
+        );
+        assert!(require_non_empty_adb_value("build", "   \n".to_string()).is_err());
+
+        let packages = parse_package_listing(
+            "package:/data/app/app.one/base.apk=app.one\nnoise\npackage:/system/app/Settings.apk=com.android.settings\n",
+        )
+        .unwrap();
+        assert_eq!(packages.len(), 2);
+        assert!(packages[0].starts_with("package:"));
+        assert!(parse_package_listing("").is_err());
+        assert!(parse_package_listing("permission denied").is_err());
     }
 
     #[test]
