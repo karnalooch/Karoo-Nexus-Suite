@@ -278,17 +278,6 @@ export default function InvestigationPage() {
     
     logInteraction(`INVESTIGATION :: Initiating Batch Extraction [${selectedIds.size} Targets]`);
     
-    const dir = await open({
-      directory: true,
-      multiple: false,
-      title: "Select Extraction Target Directory"
-    });
-
-    if (!dir) {
-      logInteraction("INVESTIGATION :: Extraction Cancelled :: No target directory selected");
-      return;
-    }
-
     const targets = packages.filter(p => selectedIds.has(p.id));
     
     for (const target of targets) {
@@ -304,12 +293,10 @@ export default function InvestigationPage() {
       const safeId = sanitizeFilename(target.id);
       const fileName = `${safeName}_${safeId}.apk`;
       
-      const cleanDir = dir.replace(/\\/g, '/').replace(/\/$/, '');
-      const localPath = `${cleanDir}/${fileName}`;
-      
       try {
-        logInteraction(`INVESTIGATION :: Pulling ${target.id} -> ${fileName}`);
-        await invoke("pull_file", { remotePath: target.path, localPath });
+        logInteraction(`INVESTIGATION :: Pulling ${target.id} -> managed extraction cache as ${fileName}`);
+        const extractedPath = await invoke<string>("pull_file", { remotePath: target.path, fileName });
+        logInteraction(`INVESTIGATION :: Extracted -> ${extractedPath}`);
         setPackages(prev => prev.map(p => p.id === target.id ? { ...p, status: 'success' } : p));
       } catch (e) {
         logInteraction(`INVESTIGATION :: FAILED :: ${target.id} :: ${e}`);
