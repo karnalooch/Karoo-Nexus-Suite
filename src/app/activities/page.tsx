@@ -15,14 +15,6 @@ interface FitSummary {
   calories: number;
 }
 
-// Simulated mock data in case device is not connected
-const MOCK_ACTIVITIES: FitSummary[] = [
-  { file_name: "sunset_highvelocity.fit", start_time: "2026-04-19T18:30:00", duration_mins: 62.5, distance_km: 38.4, avg_power: 248, avg_heart_rate: 162, calories: 1021 },
-  { file_name: "obsidian_nightrun.fit", start_time: "2026-04-18T20:15:00", duration_mins: 45.2, distance_km: 26.1, avg_power: 215, avg_heart_rate: 155, calories: 742 },
-  { file_name: "alpine_threshold.fit", start_time: "2026-04-17T08:00:00", duration_mins: 125.0, distance_km: 74.2, avg_power: 198, avg_heart_rate: 148, calories: 2103 },
-  { file_name: "velodrome_intervals.fit", start_time: "2026-04-15T17:00:00", duration_mins: 35.0, distance_km: 14.8, avg_power: 315, avg_heart_rate: 178, calories: 580 },
-];
-
 function formatDuration(mins: number) {
   const h = Math.floor(mins / 60);
   const m = Math.floor(mins % 60);
@@ -54,23 +46,20 @@ export default function ActivityPulse() {
   const [activities, setActivities] = useState<FitSummary[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [selected, setSelected] = useState<FitSummary | null>(null);
-  const [log, setLog] = useState("Neural Mirror awaiting sync...");
-  const [showMock, setShowMock] = useState(false);
+  const [log, setLog] = useState("Activity archive awaiting sync...");
 
   const handleSync = async () => {
     setIsSyncing(true);
     setLog("Initiating ADB activity pull...");
     try {
       const result = await invoke("sync_activities") as string;
-      setLog(`Sync complete: ${result}`);
-      // Real implementation would scan filesystem after sync
-      // For now, load mock data as stand-in
-      setActivities(MOCK_ACTIVITIES);
-      setShowMock(true);
+      setActivities([]);
+      setSelected(null);
+      setLog(`Sync complete: ${result}. FIT parsing is not enabled yet.`);
     } catch (e) {
-      setLog(`Sync via ADB failed — loading cached Neural Mirror.`);
-      setActivities(MOCK_ACTIVITIES);
-      setShowMock(true);
+      setActivities([]);
+      setSelected(null);
+      setLog(`Sync via ADB failed: ${String(e)}`);
     } finally {
       setIsSyncing(false);
     }
@@ -85,11 +74,6 @@ export default function ActivityPulse() {
             Activity Pulse
           </div>
           <div className="h-px flex-1 bg-white/10" />
-          {showMock && (
-            <div className="px-4 py-1.5 bg-yellow-400/20 text-yellow-400 rounded-full text-[9px] font-black uppercase tracking-widest">
-              Neural Mirror (Cached)
-            </div>
-          )}
         </div>
         <div className="flex items-end justify-between gap-8">
           <div>
@@ -97,7 +81,7 @@ export default function ActivityPulse() {
               Training <span className="text-primary not-italic">Intelligence</span>
             </h1>
             <p className="text-slate-500 font-medium mt-3 max-w-xl">
-              Pull FIT sessions from your Hammerhead Karoo via ADB and unlock deep neural performance analysis.
+              Pull FIT sessions from your Hammerhead Karoo via ADB into a local archive. Parsed training analysis is deferred until the real FIT pipeline is enabled.
             </p>
           </div>
           <motion.button
@@ -112,7 +96,7 @@ export default function ActivityPulse() {
             }`}
           >
             <RefreshCcw className={`w-5 h-5 ${isSyncing ? "animate-spin" : ""}`} />
-            {isSyncing ? "Syncing Neural Mirror..." : "Sync Activity Cloud"}
+            {isSyncing ? "Syncing Activities..." : "Sync Activities"}
           </motion.button>
         </div>
 
@@ -135,7 +119,7 @@ export default function ActivityPulse() {
           </div>
           <div>
             <p className="text-3xl font-black italic uppercase text-slate-400">No Activity Data</p>
-            <p className="text-sm text-slate-500 font-medium mt-2">Connect your Karoo over USB and tap Sync to initialize the Neural Mirror.</p>
+            <p className="text-sm text-slate-500 font-medium mt-2">Sync archives FIT files locally. Parsed activity cards will appear only after a real FIT analysis pipeline is enabled.</p>
           </div>
         </motion.div>
       ) : (
