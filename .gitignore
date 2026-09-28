@@ -43,6 +43,7 @@ next-env.d.ts
 # tauri
 /src-tauri/target
 /src-tauri/gen/schemas
+/src-tauri/tactical_cache/
 
 # local build logs
 build_log.txt
