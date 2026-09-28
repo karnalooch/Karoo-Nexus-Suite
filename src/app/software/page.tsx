@@ -83,9 +83,10 @@ export default function SoftwareHub() {
 
   const handleSideload = async (path: string) => {
     setIsInstalling("custom");
-    logInteraction(`FLASHER :: Initiating Neural Sideload for ${path}`);
+    logInteraction("FLASHER :: Staging selected APK into managed cache...");
     try {
-      const res = await invoke("install_package", { path }) as string;
+      const stagedPath = await invoke<string>("stage_local_apk", { sourcePath: path });
+      const res = await invoke("install_package", { path: stagedPath }) as string;
       logInteraction(`FLASHER :: Success :: ${res}`);
       setInstallStatus("success");
       setTimeout(() => setInstallStatus("idle"), 5000);
