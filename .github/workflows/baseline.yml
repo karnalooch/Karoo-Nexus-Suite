@@ -157,6 +157,32 @@ jobs:
       - name: Build
         run: npm run build
 
+  dependency-audit:
+    name: NPM dependency audit
+    needs: changes
+    if: ${{ needs.changes.outputs.security == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Block high and critical npm advisories
+        run: npm audit --audit-level=high
+
   rust:
     name: Rust check
     needs: changes
@@ -193,7 +219,7 @@ jobs:
       security-events: write
     uses: karnalooch/engineering-platform/.github/workflows/reusable-security.yml@d9bc67e2b17436e9df1319a6345d0ec388f407fb
     with:
-      enable_dependency_review: true
+      enable_dependency_review: false
       enable_codeql: false
       enable_trivy: true
       enable_sbom: true
@@ -223,6 +249,7 @@ jobs:
       - repo-policy
       - governance
       - frontend
+      - dependency-audit
       - rust
       - security-base
       - codeql
@@ -237,10 +264,12 @@ jobs:
           REPO_POLICY_RESULT: ${{ needs.repo-policy.result }}
           GOVERNANCE_RESULT: ${{ needs.governance.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
+          DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
           RUST_RESULT: ${{ needs.rust.result }}
           SECURITY_RESULT: ${{ needs.security-base.result }}
           CODEQL_RESULT: ${{ needs.codeql.result }}
           FRONTEND_EXPECTED: ${{ needs.changes.outputs.frontend }}
+          SECURITY_EXPECTED: ${{ needs.changes.outputs.security }}
           RUST_EXPECTED: ${{ needs.changes.outputs.rust }}
         run: |
           set -euo pipefail
@@ -272,6 +301,7 @@ jobs:
           require_success "governance" "${GOVERNANCE_RESULT}"
           require_success "security-base" "${SECURITY_RESULT}"
           require_optional "frontend" "${FRONTEND_EXPECTED}" "${FRONTEND_RESULT}"
+          require_optional "dependency-audit" "${SECURITY_EXPECTED}" "${DEPENDENCY_AUDIT_RESULT}"
           require_optional "rust" "${RUST_EXPECTED}" "${RUST_RESULT}"
           require_optional "codeql" "${FRONTEND_EXPECTED}" "${CODEQL_RESULT}"
 
