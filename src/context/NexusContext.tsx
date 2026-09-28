@@ -227,7 +227,12 @@ export function NexusProvider({ children }: { children: ReactNode }) {
           }
         }
       } catch (e) {
-        // Silent fail for polling to avoid noise
+        if (currentStatus !== "Disconnected") {
+          currentStatus = "Disconnected";
+          setAdbStatus("Disconnected");
+          setDeviceInfo(null);
+          addLog("Warning: ADB health check failed — treating device as disconnected");
+        }
       }
     };
 
